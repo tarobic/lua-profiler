@@ -11,7 +11,7 @@ The source code is available on [GitHub](https://github.com/2dengine/profile.lua
 
 ## Compatibility
 LuaJIT optimizations need to be disabled when using the profiler and co-routines are not supported.
-The profiler has been tested with both LuaJIT 2.0.5 and Lua 5.3 although there are no guarantees regarding its accuracy.
+The profiler has been tested with both Lua 5.1 and LuaJIT although there are no guarantees regarding its accuracy.
 The Lua debug module adds a tiny bit of overhead during each function call so recursion may produce worse results compared to using loops.
 Use at your own discretion!
 
