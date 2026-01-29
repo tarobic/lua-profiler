@@ -32,19 +32,19 @@ if chronos then
 end
 
 -- The "profile" module controls when to start or stop collecting data and can be used to generate reports.
----@module "profile"
-local profile = {}
+---@module "Profiler"
+local Profiler = {}
 
----@type table<function, string> labels
-local _labeled = {}
--- function definitions
-local _defined = {}
--- time of last call
-local _tcalled = {}
+---@type table<function, string> Function labels
+local labeled = {}
+---@type table<function, string> Function definitions
+local defined = {}
+---@type table<function, number?> Time of last call
+local time_called = {}
 -- total execution time
-local _telapsed = {}
+local time_elapsed = {}
 -- number of calls
-local _ncalls = {}
+local num_calls = {}
 -- list of internal profiler functions
 local _internal = {}
 
@@ -52,7 +52,7 @@ local _internal = {}
 ---@param event string Event type
 ---@param line number  Line number
 ---@param info table? Debug info table
-function profile.hooker(event, line, info)
+function Profiler.hooker(event, line, info)
 	info = info or debug.getinfo(2, "fnS")
 	local f = info.func
 	-- ignore the profiler itself
@@ -62,66 +62,66 @@ function profile.hooker(event, line, info)
 
 	-- get the function name if available
 	if info.name ~= nil then
-		_labeled[f] = info.name
+		labeled[f] = info.name
 	end
 
 	-- find the line definition
-	if not _defined[f] then
-		_defined[f] = info.short_src .. ":" .. info.linedefined
-		_ncalls[f] = 0
-		_telapsed[f] = 0
+	if not defined[f] then
+		defined[f] = info.short_src .. ":" .. info.linedefined
+		num_calls[f] = 0
+		time_elapsed[f] = 0
 	end
 
 	--todo: record memory at function call and return/tail call
-	if _tcalled[f] then
-		local dt = clock() - _tcalled[f]
-		_telapsed[f] = _telapsed[f] + dt
-		_tcalled[f] = nil
+	if time_called[f] then
+		local dt = clock() - time_called[f]
+		time_elapsed[f] = time_elapsed[f] + dt
+		time_called[f] = nil
 	end
 
 	if event == "tail call" then
 		local prev = debug.getinfo(3, "fnS")
-		profile.hooker("return", line, prev)
-		profile.hooker("call", line, info)
+		Profiler.hooker("return", line, prev)
+		Profiler.hooker("call", line, info)
 	elseif event == "call" then
-		_tcalled[f] = clock()
+		time_called[f] = clock()
 	else
-		_ncalls[f] = _ncalls[f] + 1
+		num_calls[f] = num_calls[f] + 1
 	end
 end
 
 -- Sets a clock function to be used by the profiler.
 ---@param f function Clock function that returns a number
-function profile.setclock(f)
+function Profiler.setclock(f)
 	assert(type(f) == "function", "clock must be a function")
 	clock = f
 end
 
 -- Starts collecting data.
-function profile.start()
-	debug.sethook(profile.hooker, "cr")
+function Profiler.start()
+	debug.sethook(Profiler.hooker, "cr")
 end
 
 --- Stops collecting data.
-function profile.stop()
+function Profiler.stop()
 	debug.sethook()
 
-	for f in pairs(_tcalled) do
-		local dt = clock() - _tcalled[f]
-		_telapsed[f] = _telapsed[f] + dt
-		_tcalled[f] = nil
+	for f in pairs(time_called) do
+		local dt = clock() - time_called[f]
+		time_elapsed[f] = time_elapsed[f] + dt
+		time_called[f] = nil
 	end
 
 	-- merge closures
 	local lookup = {}
-	for f, d in pairs(_defined) do
-		local id = (_labeled[f] or "?") .. d
+	for f, d in pairs(defined) do
+		local id = (labeled[f] or "?") .. d
 		local f2 = lookup[id]
 		if f2 then
-			_ncalls[f2] = _ncalls[f2] + (_ncalls[f] or 0)
-			_telapsed[f2] = _telapsed[f2] + (_telapsed[f] or 0)
-			_defined[f], _labeled[f] = nil, nil
-			_ncalls[f], _telapsed[f] = nil, nil
+			num_calls[f2] = num_calls[f2] + (num_calls[f] or 0)
+			time_elapsed[f2] = time_elapsed[f2] + (time_elapsed[f] or 0)
+			defined[f], labeled[f] = nil, nil
+			num_calls[f], time_elapsed[f] = nil, nil
 		else
 			lookup[id] = f
 		end
@@ -130,17 +130,17 @@ function profile.stop()
 end
 
 --- Resets all collected data.
-function profile.reset()
-	for f in pairs(_ncalls) do
-		_ncalls[f] = 0
+function Profiler.reset()
+	for f in pairs(num_calls) do
+		num_calls[f] = 0
 	end
 
-	for f in pairs(_telapsed) do
-		_telapsed[f] = 0
+	for f in pairs(time_elapsed) do
+		time_elapsed[f] = 0
 	end
 
-	for f in pairs(_tcalled) do
-		_tcalled[f] = nil
+	for f in pairs(time_called) do
+		time_called[f] = nil
 	end
 
 	collectgarbage("collect")
@@ -150,10 +150,10 @@ end
 ---@param a function First function
 ---@param b function Second function
 ---@return boolean True if "a" should rank higher than "b"
-function profile.comp(a, b)
-	local dt = _telapsed[b] - _telapsed[a]
+function Profiler.comp(a, b)
+	local dt = time_elapsed[b] - time_elapsed[a]
 	if dt == 0 then
-		return _ncalls[b] < _ncalls[a]
+		return num_calls[b] < num_calls[a]
 	end
 	return dt < 0
 end
@@ -162,15 +162,15 @@ end
 -- Returns the report as a numeric table of rows containing the rank, function label, number of calls, total execution time and source code line number.
 ---@param limit number? Maximum number of rows
 ---@return table Table of rows
-function profile.query(limit)
+function Profiler.query(limit)
 	local t = {}
-	for f, n in pairs(_ncalls) do
+	for f, n in pairs(num_calls) do
 		if n > 0 then
 			t[#t + 1] = f
 		end
 	end
 
-	table.sort(t, profile.comp)
+	table.sort(t, Profiler.comp)
 
 	if limit then
 		while #t > limit do
@@ -180,10 +180,10 @@ function profile.query(limit)
 
 	for i, f in ipairs(t) do
 		local dt = 0
-		if _tcalled[f] then
-			dt = clock() - _tcalled[f]
+		if time_called[f] then
+			dt = clock() - time_called[f]
 		end
-		t[i] = { i, _labeled[f] or "?", _ncalls[f], _telapsed[f] + dt, _defined[f] }
+		t[i] = { i, labeled[f] or "?", num_calls[f], time_elapsed[f] + dt, defined[f] }
 	end
 
 	return t
@@ -195,9 +195,9 @@ local cols = { 3, 29, 11, 24, 32 }
 -- Returns the report as a string that can be printed to the console.
 ---@param n number? Maximum number of rows
 ---@return string Text-based profiling report
-function profile.report(n)
+function Profiler.report(n)
 	local out = {}
-	local report = profile.query(n)
+	local report = Profiler.query(n)
 
 	for i, row in ipairs(report) do
 		for j = 1, 5 do
@@ -231,10 +231,10 @@ function profile.report(n)
 end
 
 -- store all internal profiler functions
-for _, v in pairs(profile) do
+for _, v in pairs(Profiler) do
 	if type(v) == "function" then
 		_internal[v] = true
 	end
 end
 
-return profile
+return Profiler
