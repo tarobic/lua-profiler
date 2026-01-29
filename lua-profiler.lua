@@ -24,11 +24,20 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ]]
 
+local function printf(s, ...) print(string.format(s, ...)) end
+
+-- todo: user input to specify precision or fallback to this. Probably don't want them to have to type a bunch of zeros so I'll need to convert e.g. 7 to 0.0000001
+local default_time_report_precision <const> = 0.000001
+
+-- Amount of decimal places in time report. Doesn't affect actual stats, only report presentation.
+local time_report_precision = default_time_report_precision
+
 local clock = os.clock
-local chronos = require("chronos")
+local chronos = require "chronos"
 if chronos then
 	clock = chronos.nanotime
-	print("Profiler found chronos. Upgrading clock function to chronos.nanotime")
+else
+	print "Warning: Profiler couldn't find chronos. Falling back to os.clock."
 end
 
 -- The "profile" module controls when to start or stop collecting data and can be used to generate reports.
@@ -39,13 +48,13 @@ local Profiler = {}
 local labeled = {}
 ---@type table<function, string> Function definitions
 local defined = {}
----@type table<function, number?> Time of last call
+---@type table<function, number> Time of last call
 local time_called = {}
--- total execution time
+---@type table<function, number> Total execution time
 local time_elapsed = {}
--- number of calls
+---@type table<function, number> Number of calls
 local num_calls = {}
--- list of internal profiler functions
+---@type table<function, boolean> List of internal profiler functions
 local _internal = {}
 
 --- This is an internal function.
@@ -56,13 +65,17 @@ function Profiler.hooker(event, line, info)
 	info = info or debug.getinfo(2, "fnS")
 	local f = info.func
 	-- ignore the profiler itself
-	if _internal[f] or info.what ~= "Lua" then
-		return
-	end
+	if _internal[f] or info.what ~= "Lua" then return end
 
 	-- get the function name if available
 	if info.name ~= nil then
 		labeled[f] = info.name
+		printf(
+			"event: %q, Setting labeled[%s] to %q",
+			event,
+			labeled[f],
+			info.name
+		)
 	end
 
 	-- find the line definition
@@ -98,9 +111,7 @@ function Profiler.setclock(f)
 end
 
 -- Starts collecting data.
-function Profiler.start()
-	debug.sethook(Profiler.hooker, "cr")
-end
+function Profiler.start() debug.sethook(Profiler.hooker, "cr") end
 
 --- Stops collecting data.
 function Profiler.stop()
@@ -116,17 +127,19 @@ function Profiler.stop()
 	local lookup = {}
 	for f, d in pairs(defined) do
 		local id = (labeled[f] or "?") .. d
+		printf("Retrieving labeled[%s]", labeled[f] or "?")
 		local f2 = lookup[id]
 		if f2 then
 			num_calls[f2] = num_calls[f2] + (num_calls[f] or 0)
 			time_elapsed[f2] = time_elapsed[f2] + (time_elapsed[f] or 0)
+			printf("Setting labeled[%s] to nil", labeled[f])
 			defined[f], labeled[f] = nil, nil
 			num_calls[f], time_elapsed[f] = nil, nil
 		else
 			lookup[id] = f
 		end
 	end
-	collectgarbage("collect")
+	collectgarbage "collect"
 end
 
 --- Resets all collected data.
@@ -143,7 +156,7 @@ function Profiler.reset()
 		time_called[f] = nil
 	end
 
-	collectgarbage("collect")
+	collectgarbage "collect"
 end
 
 --- This is an internal function.
@@ -152,52 +165,55 @@ end
 ---@return boolean True if "a" should rank higher than "b"
 function Profiler.comp(a, b)
 	local dt = time_elapsed[b] - time_elapsed[a]
-	if dt == 0 then
-		return num_calls[b] < num_calls[a]
-	end
+	if dt == 0 then return num_calls[b] < num_calls[a] end
 	return dt < 0
 end
 
 --- Generates a report of functions that have been called since the profile was started.
 -- Returns the report as a numeric table of rows containing the rank, function label, number of calls, total execution time and source code line number.
 ---@param limit number? Maximum number of rows
----@return table Table of rows
-function Profiler.query(limit)
-	local t = {}
+---@return table[] Table of rows
+function Profiler.get_results(limit)
+	local reports = {}
 	for f, n in pairs(num_calls) do
-		if n > 0 then
-			t[#t + 1] = f
-		end
+		if n > 0 then reports[#reports + 1] = f end
 	end
 
-	table.sort(t, Profiler.comp)
+	table.sort(reports, Profiler.comp)
 
 	if limit then
-		while #t > limit do
-			table.remove(t)
+		while #reports > limit do
+			table.remove(reports)
 		end
 	end
 
-	for i, f in ipairs(t) do
+	for i, f in ipairs(reports) do
 		local dt = 0
-		if time_called[f] then
-			dt = clock() - time_called[f]
-		end
-		t[i] = { i, labeled[f] or "?", num_calls[f], time_elapsed[f] + dt, defined[f] }
+		if time_called[f] then dt = clock() - time_called[f] end
+		printf("Generating report including labeled[%s]", labeled[f])
+
+		local time = time_elapsed[f] + dt
+		reports[i] = {
+			i,
+			labeled[f] or "?",
+			num_calls[f],
+			time - time % time_report_precision,
+			defined[f],
+		}
 	end
 
-	return t
+	return reports
 end
 
 local cols = { 3, 29, 11, 24, 32 }
 
 --- Generates a text report of functions that have been called since the profile was started.
 -- Returns the report as a string that can be printed to the console.
----@param n number? Maximum number of rows
+---@param limit number? Maximum number of rows
 ---@return string Text-based profiling report
-function Profiler.report(n)
+function Profiler.report(limit)
 	local out = {}
-	local report = Profiler.query(n)
+	local report = Profiler.get_results(limit)
 
 	for i, row in ipairs(report) do
 		for j = 1, 5 do
@@ -232,9 +248,7 @@ end
 
 -- store all internal profiler functions
 for _, v in pairs(Profiler) do
-	if type(v) == "function" then
-		_internal[v] = true
-	end
+	if type(v) == "function" then _internal[v] = true end
 end
 
 return Profiler
