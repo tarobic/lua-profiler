@@ -57,7 +57,7 @@ function profile.hooker(event, line, info)
 	end
 
 	-- get the function name if available
-	if info.name then
+	if info.name ~= nil then
 		_labeled[f] = info.name
 	end
 
@@ -206,6 +206,7 @@ function profile.report(n)
 			s = tostring(s)
 			local l1 = s:len()
 
+			assert(l2)
 			if l1 < l2 then
 				s = s .. (" "):rep(l2 - l1)
 			elseif l1 > l2 then
@@ -237,4 +238,3 @@ for _, v in pairs(profile) do
 end
 
 return profile
-
