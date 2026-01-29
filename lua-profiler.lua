@@ -25,13 +25,17 @@ SOFTWARE.
 ]]
 
 local clock = os.clock
+local chronos = require("chronos")
+if chronos then
+	clock = chronos.nanotime
+	print("Profiler found chronos. Upgrading clock function to chronos.nanotime")
+end
 
---- The "profile" module controls when to start or stop collecting data and can be used to generate reports.
--- @module profile
--- @alias profile
+-- The "profile" module controls when to start or stop collecting data and can be used to generate reports.
+---@module "profile"
 local profile = {}
 
--- function labels
+---@type table<function, string> labels
 local _labeled = {}
 -- function definitions
 local _defined = {}
@@ -68,6 +72,7 @@ function profile.hooker(event, line, info)
 		_telapsed[f] = 0
 	end
 
+	--todo: record memory at function call and return/tail call
 	if _tcalled[f] then
 		local dt = clock() - _tcalled[f]
 		_telapsed[f] = _telapsed[f] + dt
@@ -85,20 +90,15 @@ function profile.hooker(event, line, info)
 	end
 end
 
---- Sets a clock function to be used by the profiler.
+-- Sets a clock function to be used by the profiler.
 ---@param f function Clock function that returns a number
 function profile.setclock(f)
 	assert(type(f) == "function", "clock must be a function")
 	clock = f
 end
 
---- Starts collecting data.
+-- Starts collecting data.
 function profile.start()
-	-- if rawget(_G, "jit") then
-	-- 	jit.off()
-	-- 	jit.flush()
-	-- end
-
 	debug.sethook(profile.hooker, "cr")
 end
 
