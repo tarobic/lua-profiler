@@ -9,7 +9,8 @@
 			"return-type-mismatch",
 			"missing-parameter",
 			"param-type-mismatch",
-			"redundant-parameter"
+			"redundant-parameter",
+			"unnecessary-if"
 		]
 	}
 }
