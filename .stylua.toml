@@ -1,0 +1,8 @@
+call_parentheses = "None"
+collapse_simple_statement = "Always"
+column_width = 80
+indent_width = 3
+syntax = "All"
+
+[sort_requires]
+enabled = true
