@@ -205,7 +205,7 @@ function Profiler.get_results(limit)
 	return reports
 end
 
-local cols = { 3, 29, 11, 24, 32 }
+local cols = { 3, 23, 6, 15, 29 }
 
 --- Generates a text report of functions that have been called since the profile was started.
 -- Returns the report as a string that can be printed to the console.
@@ -236,9 +236,9 @@ function Profiler.report(limit)
 	end
 
 	local row =
-		" +-----+-------------------------------+-------------+--------------------------+----------------------------------+ \n"
+		" +-----+-------------------------+--------+-----------------+-------------------------------+ \n"
 	local col =
-		" | #   | Function                      | Calls       | Time                     | Code                             | \n"
+		" | #   | Function                | Calls  | Time            | Code                          | \n"
 	local sz = row .. col .. row
 	if #out > 0 then
 		sz = sz .. " | " .. table.concat(out, " | \n | ") .. " | \n"
