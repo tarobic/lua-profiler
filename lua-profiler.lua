@@ -55,7 +55,7 @@ local time_elapsed = {}
 ---@type table<function, number> Number of calls
 local num_calls = {}
 ---@type table<function, boolean> List of internal profiler functions
-local _internal = {}
+local internal = {}
 
 --- This is an internal function.
 ---@param event string Event type
@@ -65,18 +65,10 @@ function Profiler.hooker(event, line, info)
 	info = info or debug.getinfo(2, "fnS")
 	local f = info.func
 	-- ignore the profiler itself
-	if _internal[f] or info.what ~= "Lua" then return end
+	if internal[f] or info.what ~= "Lua" then return end
 
 	-- get the function name if available
-	if info.name ~= nil then
-		labeled[f] = info.name
-		printf(
-			"event: %q, Setting labeled[%s] to %q",
-			event,
-			labeled[f],
-			info.name
-		)
-	end
+	if info.name then labeled[f] = info.name end
 
 	-- find the line definition
 	if not defined[f] then
@@ -86,18 +78,28 @@ function Profiler.hooker(event, line, info)
 	end
 
 	--todo: record memory at function call and return/tail call
+
+	-- If time_called for this function was set, record time_elapsed and set time_called to nil.
 	if time_called[f] then
 		local dt = clock() - time_called[f]
 		time_elapsed[f] = time_elapsed[f] + dt
+		printf(
+			"Event: %s, %s: Setting time_elapsed to %f and time_called to nil",
+			event,
+			labeled[f],
+			time_elapsed[f]
+		)
 		time_called[f] = nil
 	end
 
 	if event == "tail call" then
+		print "tail call"
 		local prev = debug.getinfo(3, "fnS")
 		Profiler.hooker("return", line, prev)
 		Profiler.hooker("call", line, info)
 	elseif event == "call" then
 		time_called[f] = clock()
+		printf("%s: Setting time_called to %f", labeled[f], time_called[f])
 	else
 		num_calls[f] = num_calls[f] + 1
 	end
@@ -127,12 +129,10 @@ function Profiler.stop()
 	local lookup = {}
 	for f, d in pairs(defined) do
 		local id = (labeled[f] or "?") .. d
-		printf("Retrieving labeled[%s]", labeled[f] or "?")
 		local f2 = lookup[id]
 		if f2 then
 			num_calls[f2] = num_calls[f2] + (num_calls[f] or 0)
 			time_elapsed[f2] = time_elapsed[f2] + (time_elapsed[f] or 0)
-			printf("Setting labeled[%s] to nil", labeled[f])
 			defined[f], labeled[f] = nil, nil
 			num_calls[f], time_elapsed[f] = nil, nil
 		else
@@ -190,7 +190,6 @@ function Profiler.get_results(limit)
 	for i, f in ipairs(reports) do
 		local dt = 0
 		if time_called[f] then dt = clock() - time_called[f] end
-		printf("Generating report including labeled[%s]", labeled[f])
 
 		local time = time_elapsed[f] + dt
 		reports[i] = {
@@ -205,7 +204,8 @@ function Profiler.get_results(limit)
 	return reports
 end
 
-local cols = { 3, 23, 6, 15, 29 }
+-- todo: make these dynamic instead of hard coded. Could use tuples of default sizes and cutoffs.
+local col_positions = { 3, 23, 6, 15, 29 }
 
 --- Generates a text report of functions that have been called since the profile was started.
 -- Returns the report as a string that can be printed to the console.
@@ -216,9 +216,9 @@ function Profiler.report(limit)
 	local report = Profiler.get_results(limit)
 
 	for i, row in ipairs(report) do
-		for j = 1, 5 do
+		for j = 1, #row do
 			local s = row[j]
-			local l2 = cols[j]
+			local l2 = col_positions[j]
 			s = tostring(s)
 			local l1 = s:len()
 
@@ -248,7 +248,7 @@ end
 
 -- store all internal profiler functions
 for _, v in pairs(Profiler) do
-	if type(v) == "function" then _internal[v] = true end
+	if type(v) == "function" then internal[v] = true end
 end
 
 return Profiler
