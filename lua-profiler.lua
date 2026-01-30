@@ -29,15 +29,16 @@ SOFTWARE.
 local Profiler = {}
 
 local space <const> = " "
+---@diagnostic disable-next-line: unused
 local function printf(s, ...) print(string.format(s, ...)) end
 
--- todo: user input to specify precision or fallback to this. Probably don't want them to have to type a bunch of zeros so I'll need to convert e.g. 7 to 0.0000001
+-- todo: Get user input to specify precision or fallback to this. Probably don't want them to have to type a bunch of zeros so I'll need to convert e.g. 7 to 0.0000001
 local default_time_report_precision <const> = 0.000001
 
 -- Amount of decimal places in time report. Doesn't affect actual stats, only report presentation.
 local time_report_precision = default_time_report_precision
 
----@alias FuncStats {label: string, defined: string, time_called: number, time_elapsed: number, num_calls: number, time_file: file, avg_time: number }
+---@alias FuncStats {label: string, defined: string, time_called: number, time_elapsed: number, num_calls: number, time_file: file, avg_time: number, total_mem: number, mem_file: file, avg_mem: number, start_mem: number}
 
 ---@type table<function, boolean> List of internal profiler functions
 local internal = {}
@@ -45,13 +46,17 @@ local internal = {}
 local stats = {}
 
 -- Pre-allocate a bunch of FuncStats to avoid messing with results.
--- todo: Need to measure to see what difference it makes.
+-- todo: Need to measure to see what's better: this or writing everything to a temp file.
 local stats_pool = {}
 for i = 1, 10 do
 	stats_pool[i] = {
 		num_calls = 0,
 		time_elapsed = 0,
+		avg_time = 0,
+		total_mem = 0,
+		avg_mem = 0,
 		time_file = io.tmpfile(),
+		mem_file = io.tmpfile(),
 	}
 end
 
@@ -101,15 +106,31 @@ function Profiler.hooker(event, line, info)
 
 	--todo: record memory at function call and return/tail call
 
-	-- If time_called for this function was set, record time_elapsed and set time_called to nil.
+	-- If time_called was set, that means we're exiting that function.
+	-- note: I could refactor this out into a separate function but the overhead might mess with results.
 	if stats[f].time_called then
+		-- Add function duration to total time
 		local dt = clock() - stats[f].time_called
 		stats[f].time_elapsed = stats[f].time_elapsed + dt
 		stats[f].time_called = nil
 
+		-- Record function duration to calculate avg afterwards.
 		-- Doin it this way to avoid allocating a bajillion strings.
 		local file = assert(stats[f].time_file)
 		assert(file:write(dt))
+		assert(file:write(space))
+
+		-- Add function memory usage to total mem
+		assert(
+			stats[f].start_mem and stats[f].total_mem,
+			"You forgot to initialize mem fields"
+		)
+		local mem = stats[f].start_mem + collectgarbage "count"
+		stats[f].total_mem = stats[f].total_mem + mem
+
+		-- Record function memory usage to calculate avg afterwards.
+		file = assert(stats[f].mem_file)
+		assert(file:write(mem))
 		assert(file:write(space))
 	end
 
@@ -119,6 +140,7 @@ function Profiler.hooker(event, line, info)
 		Profiler.hooker("call", line, info)
 	elseif event == "call" then
 		stats[f].time_called = clock()
+		stats[f].start_mem = collectgarbage "count"
 	else
 		stats[f].num_calls = stats[f].num_calls + 1
 	end
@@ -134,6 +156,19 @@ end
 -- Starts collecting data.
 function Profiler.start() debug.sethook(Profiler.hooker, "cr") end
 
+---@param file file A file full of numbers
+---@return number[] All those numbers read into a table
+local function read_file(file)
+	assert(file:flush())
+	assert(file:seek "set")
+
+	local result = {}
+	for n in file:lines "n" do
+		result[#result + 1] = n
+	end
+	return result
+end
+
 --- Stops collecting data.
 function Profiler.stop()
 	debug.sethook()
@@ -145,13 +180,7 @@ function Profiler.stop()
 			record.time_called = nil
 		end
 
-		assert(record.time_file:flush())
-		assert(record.time_file:seek "set")
-		local times = {}
-		for n in record.time_file:lines "n" do
-			times[#times + 1] = n
-		end
-		record.avg_time = average(times)
+		record.avg_time = average(read_file(record.time_file))
 	end
 
 	-- merge closures
@@ -177,6 +206,14 @@ function Profiler.stop()
 	collectgarbage "collect"
 end
 
+---@param file file?
+---@return file
+local function reset_file(file)
+	if file and io.type(file) ~= "closed file" then assert(file:close()) end
+	file = io.tmpfile()
+	return file
+end
+
 --- Resets all collected data.
 function Profiler.reset()
 	for _, record in pairs(stats) do
@@ -185,10 +222,10 @@ function Profiler.reset()
 		record.time_called = nil
 		record.defined = nil
 		record.label = nil
-		if record.time_file and io.type(record.time_file) ~= "closed file" then
-			assert(record.time_file:close())
-		end
-		record.time_file = io.tmpfile()
+
+		record.time_file = reset_file(record.time_file)
+		record.mem_file = reset_file(record.mem_file)
+
 		table.insert(stats_pool, record)
 	end
 
@@ -196,7 +233,8 @@ function Profiler.reset()
 	collectgarbage "collect"
 end
 
---- This is an internal function.
+-- todo: add different user options for sorting
+-- This is an internal function.
 ---@param a FuncStats First function
 ---@param b FuncStats Second function
 ---@return boolean True if "a" should rank higher than "b"
@@ -245,7 +283,7 @@ function Profiler.get_results(limit)
 	return reports
 end
 
--- todo: make these dynamic instead of hard coded. Could use tuples of default sizes and cutoffs.
+-- todo: make these dynamic instead of hard-coded. Could use tuples of default sizes and cutoffs then clamp the stat value between them.
 local col_positions = { 3, 23, 6, 15, 29, 10 }
 
 -- Generates a text report of functions that have been called since the profile was started.
@@ -275,6 +313,7 @@ function Profiler.report(limit)
 		result_strings[i] = table.concat(row, " | ")
 	end
 
+	-- todo: refactor all of this for dynamic sizing. I'd like to be able to fit it on half a screen but that's not likely now with memory stats.
 	local row =
 		" +-----+-------------------------+--------+-----------------+-------------------------------+------------+ \n"
 	local col =
