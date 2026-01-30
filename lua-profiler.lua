@@ -24,6 +24,11 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ]]
 
+-- The "profile" module controls when to start or stop collecting data and can be used to generate reports.
+---@module "Profiler"
+local Profiler = {}
+
+local space <const> = " "
 local function printf(s, ...) print(string.format(s, ...)) end
 
 -- todo: user input to specify precision or fallback to this. Probably don't want them to have to type a bunch of zeros so I'll need to convert e.g. 7 to 0.0000001
@@ -32,6 +37,25 @@ local default_time_report_precision <const> = 0.000001
 -- Amount of decimal places in time report. Doesn't affect actual stats, only report presentation.
 local time_report_precision = default_time_report_precision
 
+---@alias FuncStats {label: string, defined: string, time_called: number, time_elapsed: number, num_calls: number, time_file: file, avg_time: number }
+
+---@type table<function, boolean> List of internal profiler functions
+local internal = {}
+---@type table<function, FuncStats> Map of runtime stats for each function
+local stats = {}
+
+-- Pre-allocate a bunch of FuncStats to avoid messing with results.
+-- todo: Need to measure to see what difference it makes.
+local stats_pool = {}
+for i = 1, 10 do
+	stats_pool[i] = {
+		num_calls = 0,
+		time_elapsed = 0,
+		time_file = io.tmpfile(),
+	}
+end
+
+-- Set clock to chronos if found.
 local clock = os.clock
 local chronos = require "chronos"
 if chronos then
@@ -40,30 +64,15 @@ else
 	print "Warning: Profiler couldn't find chronos. Falling back to os.clock."
 end
 
--- The "profile" module controls when to start or stop collecting data and can be used to generate reports.
----@module "Profiler"
-local Profiler = {}
-
----@alias FuncStats {label: string, defined: string, time_called: number, time_elapsed: number, num_calls: number }
-
----@type table<function, number> Memory usage at start of function
-local mem_when_called = {}
----@type table<function, number> Memory usage at start of function
-local mem_when_returned = {}
----@type table<function, boolean> List of internal profiler functions
-local internal = {}
-
----@type table<function, FuncStats>
-local stats = {}
-
--- Pre-allocate a bunch of FuncStats to avoid messing with results. Need to measure to see what difference it makes.
-local stats_pool = {}
-for i = 1, 10 do
-	stats_pool[i] = {
-		num_calls = 0,
-		time_elapsed = 0,
-	}
+local function sum(t)
+	local x = 0
+	for i = 1, #t do
+		x = x + t[i]
+	end
+	return x
 end
+
+local function average(t) return sum(t) / #t end
 
 --- This is an internal function.
 ---@param event string Event type
@@ -103,6 +112,11 @@ function Profiler.hooker(event, line, info)
 			stats[f].time_elapsed
 		)
 		stats[f].time_called = nil
+
+		-- Doin it this way to avoid allocating a bajillion strings.
+		local file = assert(stats[f].time_file)
+		assert(file:write(dt))
+		assert(file:write(space))
 	end
 
 	if event == "tail call" then
@@ -136,24 +150,37 @@ function Profiler.start() debug.sethook(Profiler.hooker, "cr") end
 function Profiler.stop()
 	debug.sethook()
 
-	for _, v in pairs(stats) do
-		if v.time_called then
-			local dt = clock() - v.time_called
-			v.time_elapsed = v.time_elapsed + dt
-			v.time_called = nil
+	for _, record in pairs(stats) do
+		if record.time_called then goto continue end
+
+		local dt = clock() - record.time_called
+		record.time_elapsed = record.time_elapsed + dt
+		record.time_called = nil
+
+		assert(record.time_file:flush())
+		assert(record.time_file:seek "set")
+		local times = {}
+		for n in record.time_file:lines "n" do
+			times[#times + 1] = n
+			print(n)
 		end
+		print(#times)
+		record.avg_time = average(times)
+
+		::continue::
 	end
 
 	-- merge closures
 	local lookup = {}
-	for f, stat in pairs(stats) do
-		local d = stat.defined
+	for f, record in pairs(stats) do
+		local d = record.defined
 		local id = (stats[f].label or "?") .. d
 		local f2 = lookup[id]
 		if f2 then
 			stats[f2].num_calls = stats[f2].num_calls + (stats[f].num_calls or 0)
 			stats[f2].time_elapsed = stats[f2].time_elapsed
 				+ (stats[f].time_elapsed or 0)
+
 			stats[f].defined, stats[f].label = nil, nil
 			stats[f].num_calls, stats[f].time_elapsed = nil, nil
 		else
@@ -165,13 +192,17 @@ end
 
 --- Resets all collected data.
 function Profiler.reset()
-	for _, v in pairs(stats) do
-		v.num_calls = 0
-		v.time_elapsed = 0
-		v.time_called = nil
-		v.defined = nil
-		v.label = nil
-		table.insert(stats_pool, v)
+	for _, record in pairs(stats) do
+		record.num_calls = 0
+		record.time_elapsed = 0
+		record.time_called = nil
+		record.defined = nil
+		record.label = nil
+		if record.time_file or io.type(record.time_file) ~= "closed file" then
+			assert(record.time_file:close())
+			record.time_file = io.tmpfile()
+		end
+		table.insert(stats_pool, record)
 	end
 
 	stats = {}
@@ -188,22 +219,22 @@ function Profiler.comp(a, b)
 	return dt < 0
 end
 
---- Generates a report of functions that have been called since the profile was started.
+-- Generates a report of functions that have been called since the profile was started.
 -- Returns the report as a numeric table of rows containing the rank, function label, number of calls, total execution time and source code line number.
 ---@param limit number? Maximum number of rows
 ---@return table[] Table of rows
 function Profiler.get_results(limit)
+	limit = limit or 500
+
 	local sorted_stats = {}
-	for _, stat in pairs(stats) do
-		if stat.num_calls > 0 then sorted_stats[#sorted_stats + 1] = stat end
+	for _, record in pairs(stats) do
+		if record.num_calls > 0 then sorted_stats[#sorted_stats + 1] = record end
 	end
 
 	table.sort(sorted_stats, Profiler.comp)
 
-	if limit then
-		while #sorted_stats > limit do
-			table.remove(sorted_stats)
-		end
+	while #sorted_stats > limit do
+		table.remove(sorted_stats)
 	end
 
 	local reports = {}
@@ -228,7 +259,7 @@ end
 -- todo: make these dynamic instead of hard coded. Could use tuples of default sizes and cutoffs.
 local col_positions = { 3, 23, 6, 15, 29 }
 
---- Generates a text report of functions that have been called since the profile was started.
+-- Generates a text report of functions that have been called since the profile was started.
 -- Returns the report as a string that can be printed to the console.
 ---@param limit number? Maximum number of rows
 ---@return string Text-based profiling report
@@ -245,7 +276,7 @@ function Profiler.report(limit)
 
 			assert(l2)
 			if l1 < l2 then
-				s = s .. (" "):rep(l2 - l1)
+				s = s .. space:rep(l2 - l1)
 			elseif l1 > l2 then
 				s = s:sub(l1 - l2 + 1, l1)
 			end
