@@ -127,6 +127,7 @@ function Profiler.hooker(event, line, info)
 		)
 		local mem = stats[f].start_mem + collectgarbage "count"
 		stats[f].total_mem = stats[f].total_mem + mem
+		stats[f].start_mem = nil
 
 		-- Record function memory usage to calculate avg afterwards.
 		file = assert(stats[f].mem_file)
@@ -159,8 +160,8 @@ function Profiler.start() debug.sethook(Profiler.hooker, "cr") end
 ---@param file file A file full of numbers
 ---@return number[] All those numbers read into a table
 local function read_file(file)
-	assert(file:flush())
-	assert(file:seek "set")
+	assert(file:flush(), "Failed to write changes to profiler temp file")
+	assert(file:seek "set", "Failed to set profiler temp file to beginning")
 
 	local result = {}
 	for n in file:lines "n" do
@@ -178,9 +179,13 @@ function Profiler.stop()
 			local dt = clock() - record.time_called
 			record.time_elapsed = record.time_elapsed + dt
 			record.time_called = nil
+
+			record.total_mem = record.total_mem + collectgarbage "count"
+			record.start_mem = nil
 		end
 
 		record.avg_time = average(read_file(record.time_file))
+		record.avg_mem = average(read_file(record.mem_file))
 	end
 
 	-- merge closures
@@ -265,7 +270,6 @@ function Profiler.get_results(limit)
 	local reports = {}
 
 	for i, stat in ipairs(sorted_stats) do
-		-- printf("sorted stat avg_time: %f", stat.avg_time)
 		local dt = 0
 		if stat.time_called then dt = clock() - stat.time_called end
 
@@ -277,6 +281,8 @@ function Profiler.get_results(limit)
 			time - time % time_report_precision,
 			stat.defined,
 			stat.avg_time - stat.avg_time % time_report_precision,
+			math.ceil(stat.total_mem),
+			math.ceil(stat.avg_mem),
 		}
 	end
 
@@ -284,7 +290,7 @@ function Profiler.get_results(limit)
 end
 
 -- todo: make these dynamic instead of hard-coded. Could use tuples of default sizes and cutoffs then clamp the stat value between them.
-local col_positions = { 3, 23, 6, 15, 29, 10 }
+local col_positions = { 3, 23, 6, 15, 29, 10, 8, 6 }
 
 -- Generates a text report of functions that have been called since the profile was started.
 -- Returns the report as a string that can be printed to the console.
@@ -315,9 +321,9 @@ function Profiler.report(limit)
 
 	-- todo: refactor all of this for dynamic sizing. I'd like to be able to fit it on half a screen but that's not likely now with memory stats.
 	local row =
-		" +-----+-------------------------+--------+-----------------+-------------------------------+------------+ \n"
+		" +-----+-------------------------+--------+-----------------+-------------------------------+------------+----------+--------+\n"
 	local col =
-		" | #   | Function                | Calls  | Time            | Code                          | Avg time   | \n"
+		" | #   | Function                | Calls  | Time            | Code                          | Avg time   | Total kb | Avg kb |\n"
 	local report_chart = row .. col .. row
 	if #result_strings > 0 then
 		report_chart = report_chart
