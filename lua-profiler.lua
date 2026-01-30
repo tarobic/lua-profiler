@@ -44,18 +44,26 @@ end
 ---@module "Profiler"
 local Profiler = {}
 
----@type table<function, string> Function labels
-local labeled = {}
----@type table<function, string> Function definitions
-local defined = {}
----@type table<function, number> Time of last call
-local time_called = {}
----@type table<function, number> Total execution time
-local time_elapsed = {}
----@type table<function, number> Number of calls
-local num_calls = {}
+---@alias FuncStats {label: string, defined: string, time_called: number, time_elapsed: number, num_calls: number }
+
+---@type table<function, number> Memory usage at start of function
+local mem_when_called = {}
+---@type table<function, number> Memory usage at start of function
+local mem_when_returned = {}
 ---@type table<function, boolean> List of internal profiler functions
 local internal = {}
+
+---@type table<function, FuncStats>
+local stats = {}
+
+-- Pre-allocate a bunch of FuncStats to avoid messing with results. Need to measure to see what difference it makes.
+local stats_pool = {}
+for i = 1, 10 do
+	stats_pool[i] = {
+		num_calls = 0,
+		time_elapsed = 0,
+	}
+end
 
 --- This is an internal function.
 ---@param event string Event type
@@ -67,29 +75,34 @@ function Profiler.hooker(event, line, info)
 	-- ignore the profiler itself
 	if internal[f] or info.what ~= "Lua" then return end
 
+	if not stats[f] then
+		-- note: test this. might need to pcall if stats_pool is all out
+		stats[f] = table.remove(stats_pool) or { num_calls = 0, time_elapsed = 0 }
+	end
+
 	-- get the function name if available
-	if info.name then labeled[f] = info.name end
+	if info.name then stats[f].label = info.name end
 
 	-- find the line definition
-	if not defined[f] then
-		defined[f] = info.short_src .. ":" .. info.linedefined
-		num_calls[f] = 0
-		time_elapsed[f] = 0
+	if not stats[f].defined then
+		stats[f].defined = info.short_src .. ":" .. info.linedefined
+		stats[f].num_calls = 0
+		stats[f].time_elapsed = 0
 	end
 
 	--todo: record memory at function call and return/tail call
 
 	-- If time_called for this function was set, record time_elapsed and set time_called to nil.
-	if time_called[f] then
-		local dt = clock() - time_called[f]
-		time_elapsed[f] = time_elapsed[f] + dt
+	if stats[f].time_called then
+		local dt = clock() - stats[f].time_called
+		stats[f].time_elapsed = stats[f].time_elapsed + dt
 		printf(
 			"Event: %s, %s: Setting time_elapsed to %f and time_called to nil",
 			event,
-			labeled[f],
-			time_elapsed[f]
+			stats[f].label,
+			stats[f].time_elapsed
 		)
-		time_called[f] = nil
+		stats[f].time_called = nil
 	end
 
 	if event == "tail call" then
@@ -98,10 +111,14 @@ function Profiler.hooker(event, line, info)
 		Profiler.hooker("return", line, prev)
 		Profiler.hooker("call", line, info)
 	elseif event == "call" then
-		time_called[f] = clock()
-		printf("%s: Setting time_called to %f", labeled[f], time_called[f])
+		stats[f].time_called = clock()
+		printf(
+			"%s: Setting time_called to %f",
+			stats[f].label,
+			stats[f].time_called
+		)
 	else
-		num_calls[f] = num_calls[f] + 1
+		stats[f].num_calls = stats[f].num_calls + 1
 	end
 end
 
@@ -119,22 +136,26 @@ function Profiler.start() debug.sethook(Profiler.hooker, "cr") end
 function Profiler.stop()
 	debug.sethook()
 
-	for f in pairs(time_called) do
-		local dt = clock() - time_called[f]
-		time_elapsed[f] = time_elapsed[f] + dt
-		time_called[f] = nil
+	for _, v in pairs(stats) do
+		if v.time_called then
+			local dt = clock() - v.time_called
+			v.time_elapsed = v.time_elapsed + dt
+			v.time_called = nil
+		end
 	end
 
 	-- merge closures
 	local lookup = {}
-	for f, d in pairs(defined) do
-		local id = (labeled[f] or "?") .. d
+	for f, stat in pairs(stats) do
+		local d = stat.defined
+		local id = (stats[f].label or "?") .. d
 		local f2 = lookup[id]
 		if f2 then
-			num_calls[f2] = num_calls[f2] + (num_calls[f] or 0)
-			time_elapsed[f2] = time_elapsed[f2] + (time_elapsed[f] or 0)
-			defined[f], labeled[f] = nil, nil
-			num_calls[f], time_elapsed[f] = nil, nil
+			stats[f2].num_calls = stats[f2].num_calls + (stats[f].num_calls or 0)
+			stats[f2].time_elapsed = stats[f2].time_elapsed
+				+ (stats[f].time_elapsed or 0)
+			stats[f].defined, stats[f].label = nil, nil
+			stats[f].num_calls, stats[f].time_elapsed = nil, nil
 		else
 			lookup[id] = f
 		end
@@ -144,28 +165,26 @@ end
 
 --- Resets all collected data.
 function Profiler.reset()
-	for f in pairs(num_calls) do
-		num_calls[f] = 0
+	for _, v in pairs(stats) do
+		v.num_calls = 0
+		v.time_elapsed = 0
+		v.time_called = nil
+		v.defined = nil
+		v.label = nil
+		table.insert(stats_pool, v)
 	end
 
-	for f in pairs(time_elapsed) do
-		time_elapsed[f] = 0
-	end
-
-	for f in pairs(time_called) do
-		time_called[f] = nil
-	end
-
+	stats = {}
 	collectgarbage "collect"
 end
 
 --- This is an internal function.
----@param a function First function
----@param b function Second function
+---@param a FuncStats First function
+---@param b FuncStats Second function
 ---@return boolean True if "a" should rank higher than "b"
 function Profiler.comp(a, b)
-	local dt = time_elapsed[b] - time_elapsed[a]
-	if dt == 0 then return num_calls[b] < num_calls[a] end
+	local dt = b.time_elapsed - a.time_elapsed
+	if dt == 0 then return b.num_calls < a.num_calls end
 	return dt < 0
 end
 
@@ -174,30 +193,32 @@ end
 ---@param limit number? Maximum number of rows
 ---@return table[] Table of rows
 function Profiler.get_results(limit)
-	local reports = {}
-	for f, n in pairs(num_calls) do
-		if n > 0 then reports[#reports + 1] = f end
+	local sorted_stats = {}
+	for _, stat in pairs(stats) do
+		if stat.num_calls > 0 then sorted_stats[#sorted_stats + 1] = stat end
 	end
 
-	table.sort(reports, Profiler.comp)
+	table.sort(sorted_stats, Profiler.comp)
 
 	if limit then
-		while #reports > limit do
-			table.remove(reports)
+		while #sorted_stats > limit do
+			table.remove(sorted_stats)
 		end
 	end
 
-	for i, f in ipairs(reports) do
-		local dt = 0
-		if time_called[f] then dt = clock() - time_called[f] end
+	local reports = {}
 
-		local time = time_elapsed[f] + dt
+	for i, stat in ipairs(sorted_stats) do
+		local dt = 0
+		if stat.time_called then dt = clock() - stat.time_called end
+
+		local time = stat.time_elapsed + dt
 		reports[i] = {
 			i,
-			labeled[f] or "?",
-			num_calls[f],
+			stat.label or "?",
+			stat.num_calls,
 			time - time % time_report_precision,
-			defined[f],
+			stat.defined,
 		}
 	end
 
