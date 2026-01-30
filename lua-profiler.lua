@@ -105,12 +105,6 @@ function Profiler.hooker(event, line, info)
 	if stats[f].time_called then
 		local dt = clock() - stats[f].time_called
 		stats[f].time_elapsed = stats[f].time_elapsed + dt
-		printf(
-			"Event: %s, %s: Setting time_elapsed to %f and time_called to nil",
-			event,
-			stats[f].label,
-			stats[f].time_elapsed
-		)
 		stats[f].time_called = nil
 
 		-- Doin it this way to avoid allocating a bajillion strings.
@@ -120,17 +114,11 @@ function Profiler.hooker(event, line, info)
 	end
 
 	if event == "tail call" then
-		print "tail call"
 		local prev = debug.getinfo(3, "fnS")
 		Profiler.hooker("return", line, prev)
 		Profiler.hooker("call", line, info)
 	elseif event == "call" then
 		stats[f].time_called = clock()
-		printf(
-			"%s: Setting time_called to %f",
-			stats[f].label,
-			stats[f].time_called
-		)
 	else
 		stats[f].num_calls = stats[f].num_calls + 1
 	end
@@ -138,7 +126,7 @@ end
 
 -- Sets a clock function to be used by the profiler.
 ---@param f function Clock function that returns a number
-function Profiler.setclock(f)
+function Profiler.set_clock(f)
 	assert(type(f) == "function", "clock must be a function")
 	clock = f
 end
@@ -151,23 +139,19 @@ function Profiler.stop()
 	debug.sethook()
 
 	for _, record in pairs(stats) do
-		if record.time_called then goto continue end
-
-		local dt = clock() - record.time_called
-		record.time_elapsed = record.time_elapsed + dt
-		record.time_called = nil
+		if record.time_called then
+			local dt = clock() - record.time_called
+			record.time_elapsed = record.time_elapsed + dt
+			record.time_called = nil
+		end
 
 		assert(record.time_file:flush())
 		assert(record.time_file:seek "set")
 		local times = {}
 		for n in record.time_file:lines "n" do
 			times[#times + 1] = n
-			print(n)
 		end
-		print(#times)
 		record.avg_time = average(times)
-
-		::continue::
 	end
 
 	-- merge closures
@@ -180,13 +164,16 @@ function Profiler.stop()
 			stats[f2].num_calls = stats[f2].num_calls + (stats[f].num_calls or 0)
 			stats[f2].time_elapsed = stats[f2].time_elapsed
 				+ (stats[f].time_elapsed or 0)
+			stats[f2].avg_time = stats[f2].avg_time + (stats[f].avg_time or 0)
 
 			stats[f].defined, stats[f].label = nil, nil
 			stats[f].num_calls, stats[f].time_elapsed = nil, nil
+			stats[f].avg_time = nil
 		else
 			lookup[id] = f
 		end
 	end
+
 	collectgarbage "collect"
 end
 
@@ -198,10 +185,10 @@ function Profiler.reset()
 		record.time_called = nil
 		record.defined = nil
 		record.label = nil
-		if record.time_file or io.type(record.time_file) ~= "closed file" then
+		if record.time_file and io.type(record.time_file) ~= "closed file" then
 			assert(record.time_file:close())
-			record.time_file = io.tmpfile()
 		end
+		record.time_file = io.tmpfile()
 		table.insert(stats_pool, record)
 	end
 
@@ -240,6 +227,7 @@ function Profiler.get_results(limit)
 	local reports = {}
 
 	for i, stat in ipairs(sorted_stats) do
+		-- printf("sorted stat avg_time: %f", stat.avg_time)
 		local dt = 0
 		if stat.time_called then dt = clock() - stat.time_called end
 
@@ -250,6 +238,7 @@ function Profiler.get_results(limit)
 			stat.num_calls,
 			time - time % time_report_precision,
 			stat.defined,
+			stat.avg_time - stat.avg_time % time_report_precision,
 		}
 	end
 
@@ -257,21 +246,20 @@ function Profiler.get_results(limit)
 end
 
 -- todo: make these dynamic instead of hard coded. Could use tuples of default sizes and cutoffs.
-local col_positions = { 3, 23, 6, 15, 29 }
+local col_positions = { 3, 23, 6, 15, 29, 10 }
 
 -- Generates a text report of functions that have been called since the profile was started.
 -- Returns the report as a string that can be printed to the console.
 ---@param limit number? Maximum number of rows
 ---@return string Text-based profiling report
 function Profiler.report(limit)
-	local out = {}
-	local report = Profiler.get_results(limit)
+	local result_strings = {}
+	local results = Profiler.get_results(limit)
 
-	for i, row in ipairs(report) do
+	for i, row in ipairs(results) do
 		for j = 1, #row do
-			local s = row[j]
+			local s = tostring(row[j])
 			local l2 = col_positions[j]
-			s = tostring(s)
 			local l1 = s:len()
 
 			assert(l2)
@@ -284,18 +272,21 @@ function Profiler.report(limit)
 			row[j] = s
 		end
 
-		out[i] = table.concat(row, " | ")
+		result_strings[i] = table.concat(row, " | ")
 	end
 
 	local row =
-		" +-----+-------------------------+--------+-----------------+-------------------------------+ \n"
+		" +-----+-------------------------+--------+-----------------+-------------------------------+------------+ \n"
 	local col =
-		" | #   | Function                | Calls  | Time            | Code                          | \n"
-	local sz = row .. col .. row
-	if #out > 0 then
-		sz = sz .. " | " .. table.concat(out, " | \n | ") .. " | \n"
+		" | #   | Function                | Calls  | Time            | Code                          | Avg time   | \n"
+	local report_chart = row .. col .. row
+	if #result_strings > 0 then
+		report_chart = report_chart
+			.. " | "
+			.. table.concat(result_strings, " | \n | ")
+			.. " | \n"
 	end
-	return "\n" .. sz .. row
+	return "\n" .. report_chart .. row
 end
 
 -- store all internal profiler functions
