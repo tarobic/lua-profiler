@@ -174,28 +174,6 @@ end
 -- Starts collecting data.
 function Profiler.start() debug.sethook(Profiler.hooker, "cr") end
 
-function Profiler._merge_closures()
-	local closures_lookup = {}
-	for f, record in pairs(stats) do
-		local d = record.defined
-		local id = (stats[f].label or "?") .. d
-		local f2 = closures_lookup[id]
-		if f2 then
-			stats[f2].num_calls = stats[f2].num_calls + (stats[f].num_calls or 0)
-			stats[f2].time_elapsed = stats[f2].time_elapsed
-				+ (stats[f].time_elapsed or 0)
-			stats[f2].avg_time = stats[f2].avg_time + (stats[f].avg_time or 0)
-
-			stats[f].defined, stats[f].label = nil, nil
-			stats[f].num_calls, stats[f].time_elapsed = nil, nil
-			stats[f].avg_time = nil
-		else
-			closures_lookup[id] = f
-		end
-	end
-end
-
---- Stops collecting data.
 function Profiler.stop()
 	debug.sethook()
 
@@ -213,7 +191,6 @@ function Profiler.stop()
 		record.avg_mem = Profiler._average(Profiler._read_file(record.mem_file))
 	end
 
-	Profiler._merge_closures()
 	collectgarbage "collect"
 end
 
