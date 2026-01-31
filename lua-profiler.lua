@@ -25,6 +25,8 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ]]
 
+local baseline_memory = collectgarbage "count"
+
 -- Controls when to start or stop collecting data and can be used to generate reports.
 ---@module "Profiler"
 local Profiler = {}
@@ -32,8 +34,6 @@ local Profiler = {}
 local utils = require "lua_utils"
 
 local space <const> = " "
----@diagnostic disable-next-line: unused
-local function printf(s, ...) print(string.format(s, ...)) end
 
 -- todo: Get user input to specify precision or fallback to this. Probably don't want them to have to type a bunch of zeros so I'll need to convert e.g. 7 to 0.0000001
 local default_time_report_precision <const> = 0.000001
@@ -63,7 +63,7 @@ end
 -- Pre-allocate a bunch of FuncStats to avoid messing with results.
 -- todo: Need to measure to see what's better: this or writing everything to a temp file.
 local stats_pool = {}
-for i = 1, 20 do
+for i = 1, 50 do
 	stats_pool[i] = Profiler._new_func_stat()
 end
 
@@ -75,6 +75,9 @@ if chronos then
 else
 	print "Warning: Profiler couldn't find chronos. Falling back to os.clock."
 end
+
+local memory_to_ignore = collectgarbage "count" - baseline_memory
+print("memory_to_ignore: " .. memory_to_ignore)
 
 --- This is an internal function.
 ---@param event string Event type
@@ -102,10 +105,10 @@ function Profiler.hooker(event, line, info)
 		-- stats[f] = table.remove(stats_pool) or Profiler._new_func_stat()
 		local stat = table.remove(stats_pool)
 		if not stat then
-			utils.printf("Creating new stat, #stats: %d", utils.dict_len(stats))
+			-- utils.printf("Creating new stat, #stats: %d", utils.dict_len(stats))
 			stat_record = Profiler._new_func_stat()
 		else
-			print "Removing stat from pool"
+			-- print "Removing stat from pool"
 			stat_record = stat
 		end
 		stats[info.func] = stat_record
@@ -178,6 +181,7 @@ function Profiler.stop()
 	debug.sethook()
 
 	for _, record in pairs(stats) do
+		-- If profiler was stopped before a function returned, close out that function.
 		if record.time_called then
 			local dt = clock() - record.time_called
 			record.time_elapsed = record.time_elapsed + dt
@@ -187,8 +191,13 @@ function Profiler.stop()
 			record.start_mem = nil
 		end
 
-		record.avg_time = Profiler._average(Profiler._read_file(record.time_file))
-		record.avg_mem = Profiler._average(Profiler._read_file(record.mem_file))
+		record.total_mem = record.total_mem - memory_to_ignore
+
+		local all_times = Profiler._read_file(record.time_file)
+		record.avg_time = Profiler._average(all_times)
+
+		local all_mem_usage = Profiler._read_file(record.mem_file)
+		record.avg_mem = Profiler._average(all_mem_usage)
 	end
 
 	collectgarbage "collect"
@@ -335,8 +344,8 @@ end
 ---@param file file A file full of numbers
 ---@return number[] All those numbers read into a table
 function Profiler._read_file(file)
-	assert(file:flush(), "Failed to write changes to profiler temp file")
-	assert(file:seek "set", "Failed to set profiler temp file to beginning")
+	assert(file:flush())
+	assert(file:seek "set")
 
 	local result = {}
 	for n in file:lines "n" do
