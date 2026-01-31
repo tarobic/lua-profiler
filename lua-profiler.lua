@@ -1,3 +1,4 @@
+--
 --[[
 This file is a part of the "profile.lua" library.
 
@@ -28,6 +29,8 @@ SOFTWARE.
 ---@module "Profiler"
 local Profiler = {}
 
+local utils = require "lua_utils"
+
 local space <const> = " "
 ---@diagnostic disable-next-line: unused
 local function printf(s, ...) print(string.format(s, ...)) end
@@ -38,7 +41,7 @@ local default_time_report_precision <const> = 0.000001
 -- Amount of decimal places in time report. Doesn't affect actual stats, only report presentation.
 local time_report_precision = default_time_report_precision
 
----@alias FuncStats {label: string, defined: string, time_called: number, time_elapsed: number, num_calls: number, time_file: file, avg_time: number, total_mem: number, mem_file: file, avg_mem: number, start_mem: number}
+---@alias FuncStats {label: string, defined: string, time_called: number, time_elapsed: number, num_calls: number, time_file: file, avg_time: number, total_mem: number, mem_file: file, avg_mem: number, start_mem: number, short_src: string, linedefined: number}
 
 ---@type table<function, boolean> List of internal profiler functions
 local internal = {}
@@ -52,15 +55,15 @@ function Profiler._new_func_stat()
 		avg_time = 0,
 		total_mem = 0,
 		avg_mem = 0,
-		time_file = assert(io.tmpfile(), "Failed to create temp time file"),
-		mem_file = assert(io.tmpfile(), "Failed to create temp mem file"),
+		time_file = assert(io.tmpfile()),
+		mem_file = assert(io.tmpfile()),
 	}
 end
 
 -- Pre-allocate a bunch of FuncStats to avoid messing with results.
 -- todo: Need to measure to see what's better: this or writing everything to a temp file.
 local stats_pool = {}
-for i = 1, 20 do
+for i = 1, 500 do
 	stats_pool[i] = Profiler._new_func_stat()
 end
 
@@ -79,51 +82,73 @@ end
 ---@param info table? Debug info table
 function Profiler.hooker(event, line, info)
 	info = info or debug.getinfo(2, "fnS")
-	local f = info.func
 	-- ignore the profiler itself
-	if internal[f] or info.what ~= "Lua" then return end
+	if internal[info.func] or info.what ~= "Lua" then return end
 
-	if not stats[f] then
-		stats[f] = table.remove(stats_pool) or Profiler._new_func_stat()
+	local stat_record = stats[info.func]
+
+	-- utils.print_dict(info)
+	if not stat_record then
+		for _, record in pairs(stats) do
+			if
+				info.short_src == record.short_src
+				and info.linedefined == record.linedefined
+			then
+				stat_record = record
+				goto closure_already_recorded
+			end
+		end
+
+		-- stats[f] = table.remove(stats_pool) or Profiler._new_func_stat()
+		local stat = table.remove(stats_pool)
+		if not stat then
+			utils.printf("Creating new stat, #stats: %d", utils.dict_len(stats))
+			stat_record = Profiler._new_func_stat()
+		else
+			print "Removing stat from pool"
+			stat_record = stat
+		end
+
+		::closure_already_recorded::
 	end
 
 	-- get the function name if available
-	if info.name then stats[f].label = info.name end
+	if info.name then stat_record.label = info.name end
 
 	-- find the line definition
-	if not stats[f].defined then
-		stats[f].defined = info.short_src .. ":" .. info.linedefined
-		stats[f].num_calls = 0
-		stats[f].time_elapsed = 0
+	if not stat_record.defined then
+		stat_record.short_src = info.short_src
+		stat_record.linedefined = info.linedefined
+		stat_record.defined = info.short_src .. ":" .. info.linedefined
+		stat_record.num_calls = 0
+		stat_record.time_elapsed = 0
 	end
-
-	--todo: record memory at function call and return/tail call
 
 	-- If time_called was set, that means we're exiting that function.
 	-- note: I could refactor this out into a separate function but the overhead might mess with results.
-	if stats[f].time_called then
+	if stat_record.time_called then
 		-- Add function duration to total time
-		local dt = clock() - stats[f].time_called
-		stats[f].time_elapsed = stats[f].time_elapsed + dt
-		stats[f].time_called = nil
+		local dt = clock() - stat_record.time_called
+		stat_record.time_elapsed = stat_record.time_elapsed + dt
+		stat_record.time_called = nil
 
 		-- Record function duration to calculate avg afterwards.
 		-- Doin it this way to avoid allocating a bajillion strings.
-		assert(stats[f].time_file:write(dt), "Failed to write to time file")
-		assert(stats[f].time_file:write(space), "Failed to write to time file")
+		assert(stat_record.time_file:write(dt), "Failed to write to time file")
+		assert(stat_record.time_file:write(space), "Failed to write to time file")
 
 		-- Add function memory usage to total mem
 		assert(
-			stats[f].start_mem and stats[f].total_mem,
+			stat_record.start_mem and stat_record.total_mem,
 			"You forgot to initialize mem fields"
 		)
-		local mem = stats[f].start_mem + collectgarbage "count"
-		stats[f].total_mem = stats[f].total_mem + mem
-		stats[f].start_mem = nil
+		local mem = stat_record.start_mem + collectgarbage "count"
+		stat_record.total_mem = stat_record.total_mem + mem
+		stat_record.start_mem = nil
 
 		-- Record function memory usage to calculate avg afterwards.
-		assert(stats[f].mem_file:write(mem))
-		assert(stats[f].mem_file:write(space))
+		assert(stat_record.mem_file:write(mem))
+		assert(stat_record.mem_file:write(space))
 	end
 
 	if event == "tail call" then
@@ -131,10 +156,10 @@ function Profiler.hooker(event, line, info)
 		Profiler.hooker("return", line, prev)
 		Profiler.hooker("call", line, info)
 	elseif event == "call" then
-		stats[f].time_called = clock()
-		stats[f].start_mem = collectgarbage "count"
+		stat_record.time_called = clock()
+		stat_record.start_mem = collectgarbage "count"
 	else
-		stats[f].num_calls = stats[f].num_calls + 1
+		stat_record.num_calls = stat_record.num_calls + 1
 	end
 end
 
@@ -147,6 +172,27 @@ end
 
 -- Starts collecting data.
 function Profiler.start() debug.sethook(Profiler.hooker, "cr") end
+
+function Profiler._merge_closures()
+	local closures_lookup = {}
+	for f, record in pairs(stats) do
+		local d = record.defined
+		local id = (stats[f].label or "?") .. d
+		local f2 = closures_lookup[id]
+		if f2 then
+			stats[f2].num_calls = stats[f2].num_calls + (stats[f].num_calls or 0)
+			stats[f2].time_elapsed = stats[f2].time_elapsed
+				+ (stats[f].time_elapsed or 0)
+			stats[f2].avg_time = stats[f2].avg_time + (stats[f].avg_time or 0)
+
+			stats[f].defined, stats[f].label = nil, nil
+			stats[f].num_calls, stats[f].time_elapsed = nil, nil
+			stats[f].avg_time = nil
+		else
+			closures_lookup[id] = f
+		end
+	end
+end
 
 --- Stops collecting data.
 function Profiler.stop()
@@ -166,26 +212,7 @@ function Profiler.stop()
 		record.avg_mem = Profiler._average(Profiler._read_file(record.mem_file))
 	end
 
-	-- merge closures
-	local lookup = {}
-	for f, record in pairs(stats) do
-		local d = record.defined
-		local id = (stats[f].label or "?") .. d
-		local f2 = lookup[id]
-		if f2 then
-			stats[f2].num_calls = stats[f2].num_calls + (stats[f].num_calls or 0)
-			stats[f2].time_elapsed = stats[f2].time_elapsed
-				+ (stats[f].time_elapsed or 0)
-			stats[f2].avg_time = stats[f2].avg_time + (stats[f].avg_time or 0)
-
-			stats[f].defined, stats[f].label = nil, nil
-			stats[f].num_calls, stats[f].time_elapsed = nil, nil
-			stats[f].avg_time = nil
-		else
-			lookup[id] = f
-		end
-	end
-
+	Profiler._merge_closures()
 	collectgarbage "collect"
 end
 
@@ -228,7 +255,12 @@ function Profiler.get_results(limit)
 
 	local sorted_stats = {}
 	for _, record in pairs(stats) do
-		if record.num_calls > 0 then sorted_stats[#sorted_stats + 1] = record end
+		for k, v in pairs(record) do
+			print(k, v)
+		end
+		if record.num_calls and record.num_calls > 0 then
+			sorted_stats[#sorted_stats + 1] = record
+		end
 	end
 
 	table.sort(sorted_stats, Profiler.comp)
