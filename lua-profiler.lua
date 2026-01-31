@@ -54,14 +54,12 @@ function Profiler._new_func_stat()
 		time_elapsed = 0,
 		avg_time = 0,
 		total_mem = 0,
-		avg_mem = 0,
 		time_file = assert(io.tmpfile()),
 		mem_file = assert(io.tmpfile()),
 	}
 end
 
 -- Pre-allocate a bunch of FuncStats to avoid messing with results.
--- todo: Need to measure to see what's better: this or writing everything to a temp file.
 local stats_pool = {}
 for i = 1, 50 do
 	stats_pool[i] = Profiler._new_func_stat()
@@ -75,8 +73,6 @@ if chronos then
 else
 	print "Warning: Profiler couldn't find chronos. Falling back to os.clock."
 end
-
-local memory_to_ignore <const> = collectgarbage "count" - baseline_memory
 
 local gc_cycles = 0
 local gc_file = assert(io.tmpfile())
@@ -95,19 +91,21 @@ do
 	setmetatable({}, mt)
 end
 
---- This is an internal function.
+local memory_to_ignore = collectgarbage "count" - baseline_memory
+
 ---@param event string Event type
 ---@param line number  Line number
 ---@param info table? Debug info table
-function Profiler.hooker(event, line, info)
+function Profiler._check_stats(event, line, info)
+	-- note: I could refactor this out into separate functions but the overhead might mess with results.
 	info = info or debug.getinfo(2, "fnS")
 	-- ignore the profiler itself
 	if internal[info.func] or info.what ~= "Lua" then return end
 
 	local stat_record = stats[info.func]
 
-	-- utils.print_dict(info)
 	if not stat_record then
+		-- Check if this closure has already been recorded.
 		for _, record in pairs(stats) do
 			if
 				info.short_src == record.short_src
@@ -121,10 +119,10 @@ function Profiler.hooker(event, line, info)
 		-- stats[f] = table.remove(stats_pool) or Profiler._new_func_stat()
 		local stat = table.remove(stats_pool)
 		if not stat then
-			-- utils.printf("Creating new stat, #stats: %d", utils.dict_len(stats))
+			local before = collectgarbage "count"
 			stat_record = Profiler._new_func_stat()
+			memory_to_ignore = memory_to_ignore + (collectgarbage "count" - before)
 		else
-			-- print "Removing stat from pool"
 			stat_record = stat
 		end
 		stats[info.func] = stat_record
@@ -136,16 +134,16 @@ function Profiler.hooker(event, line, info)
 	if info.name then stat_record.label = info.name end
 
 	-- find the line definition
-	if not stat_record.defined then
+	-- if not stat_record.defined then
+	if not stat_record.short_src then
 		stat_record.short_src = info.short_src
 		stat_record.linedefined = info.linedefined
-		stat_record.defined = info.short_src .. ":" .. info.linedefined
+		-- stat_record.defined = info.short_src .. ":" .. info.linedefined
 		stat_record.num_calls = 0
 		stat_record.time_elapsed = 0
 	end
 
 	-- If time_called was set, that means we're exiting that function.
-	-- note: I could refactor this out into a separate function but the overhead might mess with results.
 	if stat_record.time_called then
 		-- Add function duration to total time
 		local dt = clock() - stat_record.time_called
@@ -154,15 +152,16 @@ function Profiler.hooker(event, line, info)
 
 		-- Record function duration to calculate avg afterwards.
 		-- Doin it this way to avoid allocating a bajillion strings.
-		assert(stat_record.time_file:write(dt), "Failed to write to time file")
-		assert(stat_record.time_file:write(space), "Failed to write to time file")
+		assert(stat_record.time_file:write(dt))
+		assert(stat_record.time_file:write(space))
 
 		-- Add function memory usage to total mem
 		assert(
 			stat_record.start_mem and stat_record.total_mem,
 			"You forgot to initialize mem fields"
 		)
-		local mem = stat_record.start_mem + collectgarbage "count"
+
+		local mem = collectgarbage "count" - stat_record.start_mem
 		stat_record.total_mem = stat_record.total_mem + mem
 		stat_record.start_mem = nil
 
@@ -173,8 +172,8 @@ function Profiler.hooker(event, line, info)
 
 	if event == "tail call" then
 		local prev = debug.getinfo(3, "fnS")
-		Profiler.hooker("return", line, prev)
-		Profiler.hooker("call", line, info)
+		Profiler._check_stats("return", line, prev)
+		Profiler._check_stats("call", line, info)
 	elseif event == "call" then
 		stat_record.time_called = clock()
 		stat_record.start_mem = collectgarbage "count"
@@ -191,7 +190,7 @@ function Profiler.set_clock(f)
 end
 
 -- Starts collecting data.
-function Profiler.start() debug.sethook(Profiler.hooker, "cr") end
+function Profiler.start() debug.sethook(Profiler._check_stats, "cr") end
 
 function Profiler.stop()
 	debug.sethook()
@@ -209,10 +208,13 @@ function Profiler.stop()
 
 		record.total_mem = record.total_mem - memory_to_ignore
 
+		local converted_mem, size_unit =
+			utils.convert_units(record.total_mem, "kb")
+		utils.printf("%f to %f %s", record.total_mem, converted_mem, size_unit)
+
 		local all_times = Profiler._read_file(record.time_file)
 		record.avg_time = Profiler._average(all_times)
 
-		-- fixme
 		local all_mem_usage = Profiler._read_file(record.mem_file)
 		record.avg_mem = Profiler._average(all_mem_usage)
 	end
@@ -223,11 +225,17 @@ end
 --- Resets all collected data.
 function Profiler.reset()
 	for _, record in pairs(stats) do
-		record.num_calls = 0
-		record.time_elapsed = 0
-		record.time_called = nil
-		record.defined = nil
 		record.label = nil
+		record.defined = nil
+		record.time_called = nil
+		record.time_elapsed = 0
+		record.num_calls = 0
+		record.avg_time = 0
+		record.total_mem = 0
+		record.avg_mem = nil
+		record.start_mem = nil
+		record.short_src = nil
+		record.linedefined = nil
 
 		record.time_file = Profiler._reset_file(record.time_file)
 		record.mem_file = Profiler._reset_file(record.mem_file)
@@ -242,34 +250,56 @@ function Profiler.reset()
 end
 
 -- todo: add different user options for sorting
--- This is an internal function.
 ---@param a FuncStats First function
 ---@param b FuncStats Second function
 ---@return boolean True if "a" should rank higher than "b"
-function Profiler.comp(a, b)
+function Profiler._comp(a, b)
 	local dt = b.time_elapsed - a.time_elapsed
 	if dt == 0 then return b.num_calls < a.num_calls end
 	return dt < 0
 end
 
+local categories = {
+	"rank",
+	"definition",
+	"num_calls",
+	"time",
+	"avg_time",
+	"total_mem",
+	"avg_mem",
+}
+local reverse_categories = {}
+for i, v in ipairs(categories) do
+	reverse_categories[v] = i
+end
+
+---@type table<string, {title: string, cutoff: integer}>
+local columns = {
+	rank = { title = "#", cutoff = 3 },
+	definition = { title = "Function", cutoff = 40 },
+	num_calls = { title = "Calls", cutoff = 8 },
+	time = { title = "Time", cutoff = 15 },
+	avg_time = { title = "Avg time", cutoff = 10 },
+	total_mem = { title = "Total kb", cutoff = 12 },
+	avg_mem = { title = "Avg kb", cutoff = 6 },
+}
+
+---@alias Result {rank: integer, definition: string, num_calls: integer, time: number, avg_time: number, total_mem: number, avg_mem: number}
+
 -- Generates a report of functions that have been called since the profile was started.
--- Returns the report as a numeric table of rows containing the rank, function label, number of calls, total execution time and source code line number.
----@param limit number? Maximum number of rows
----@return table[] Table of rows
-function Profiler.get_results(limit)
+---@param limit number? Maximum number of results
+---@return Result[] Table of results
+function Profiler._get_results(limit)
 	limit = limit or 500
 
 	local sorted_stats = {}
 	for _, record in pairs(stats) do
-		for k, v in pairs(record) do
-			print(k, v)
-		end
 		if record.num_calls and record.num_calls > 0 then
 			sorted_stats[#sorted_stats + 1] = record
 		end
 	end
 
-	table.sort(sorted_stats, Profiler.comp)
+	table.sort(sorted_stats, Profiler._comp)
 
 	while #sorted_stats > limit do
 		table.remove(sorted_stats)
@@ -283,58 +313,85 @@ function Profiler.get_results(limit)
 
 		local time = stat.time_elapsed + dt
 		reports[i] = {
-			i,
-			string.format("%s %s", stat.label or "?", stat.defined),
-			-- stat.label or "?",
-			stat.num_calls,
-			time - time % time_report_precision,
-			-- stat.defined,
-			stat.avg_time - stat.avg_time % time_report_precision,
+			rank = i,
+			definition = string.format(
+				"%s %s:%s",
+				stat.label or "?",
+				stat.short_src,
+				stat.linedefined
+			),
+			num_calls = stat.num_calls,
+			time = time - time % time_report_precision,
+			avg_time = stat.avg_time - stat.avg_time % time_report_precision,
 			-- todo: convert between kb and mb depending on size
-			math.ceil(stat.total_mem),
-			math.ceil(stat.avg_mem),
+			total_mem = utils.round(stat.total_mem),
+			avg_mem = utils.round(stat.avg_mem),
 		}
 	end
 
 	return reports
 end
 
--- todo: make these dynamic instead of hard-coded. Could use tuples of default sizes and cutoffs then clamp the stat value between them.
-local col_positions = { 3, 40, 8, 15, 10, 12, 6 }
-
--- Generates a text report of functions that have been called since the profile was started.
--- Returns the report as a string that can be printed to the console.
+-- Generates a text report of functions that have been called since the profile was started. Returns the report as a string that can be printed to the console.
 ---@param limit number? Maximum number of rows
 ---@return string Text-based profiling report
 function Profiler.report(limit)
 	local result_strings = {}
-	local results = Profiler.get_results(limit)
+	local results = Profiler._get_results(limit)
 
-	for i, row in ipairs(results) do
-		for j = 1, #row do
-			local s = tostring(row[j])
-			local l2 = col_positions[j]
-			local l1 = s:len()
+	for i, result in ipairs(results) do
+		local row = {}
+		for k, v in pairs(result) do
+			local s = tostring(v)
+			local cutoff = columns[k].cutoff
+			local s_len = s:len()
 
-			assert(l2)
-			if l1 < l2 then
-				s = s .. space:rep(l2 - l1)
-			elseif l1 > l2 then
-				s = s:sub(l1 - l2 + 1, l1)
+			if s_len < cutoff then
+				s = s .. space:rep(cutoff - s_len)
+			elseif s_len > cutoff then
+				s = s:sub(s_len - cutoff + 1, s_len)
 			end
 
-			row[j] = s
+			local index = reverse_categories[k]
+			row[index] = s
 		end
 
+		for k, v in pairs(row) do
+			print(k, v)
+		end
 		result_strings[i] = table.concat(row, " | ")
 	end
 
-	-- todo: refactor all of this for dynamic sizing. I'd like to be able to fit it on half a screen but that's not likely now with memory stats.
-	local row =
-		" +-----+------------------------------------------+----------+-----------------+------------+--------------+--------+\n"
-	local col =
-		" | #   | Function                                 | Calls    | Time            | Avg time   | Total kb     | Avg kb |\n"
-	local report_chart = row .. col .. row
+	-- Its ugly but at least column sizes can be adjusted from one value now.
+	local row_separator = string.format(
+		" +%s+%s+%s+%s+%s+%s+%s+\n",
+		string.rep("-", columns.rank.cutoff + 2),
+		string.rep("-", columns.definition.cutoff + 2),
+		string.rep("-", columns.num_calls.cutoff + 2),
+		string.rep("-", columns.time.cutoff + 2),
+		string.rep("-", columns.avg_time.cutoff + 2),
+		string.rep("-", columns.total_mem.cutoff + 2),
+		string.rep("-", columns.avg_mem.cutoff + 2)
+	)
+	local category_headers = string.format(
+		" | %s%s | %s%s | %s%s | %s%s | %s%s | %s%s | %s%s |\n",
+		columns.rank.title,
+		string.rep(space, columns.rank.cutoff - #columns.rank.title),
+		columns.definition.title,
+		string.rep(space, columns.definition.cutoff - #columns.definition.title),
+		columns.num_calls.title,
+		string.rep(space, columns.num_calls.cutoff - #columns.num_calls.title),
+		columns.time.title,
+		string.rep(space, columns.time.cutoff - #columns.time.title),
+		columns.avg_time.title,
+		string.rep(space, columns.avg_time.cutoff - #columns.avg_time.title),
+		columns.total_mem.title,
+		string.rep(space, columns.total_mem.cutoff - #columns.total_mem.title),
+		columns.avg_mem.title,
+		string.rep(space, columns.avg_mem.cutoff - #columns.avg_mem.title)
+	)
+
+	local report_chart = row_separator .. category_headers .. row_separator
 	if #result_strings > 0 then
 		report_chart = report_chart
 			.. " | "
@@ -343,13 +400,15 @@ function Profiler.report(limit)
 	end
 	-- return "\n" .. report_chart .. row
 
-	local gc_report = string.format(
-		"\ngc cycles: %d, gc run every %f on average",
-		gc_cycles,
-		Profiler._average(Profiler._read_file(gc_file))
-	)
+	local gc_report = gc_cycles > 1
+			and string.format(
+				"\ngc cycles: %d, gc run every %f on average",
+				gc_cycles,
+				Profiler._average(Profiler._read_file(gc_file))
+			)
+		or ""
 
-	return "\n" .. report_chart .. row .. gc_report
+	return "\n" .. report_chart .. row_separator .. gc_report
 end
 
 function Profiler._sum(t)
