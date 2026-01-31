@@ -63,7 +63,7 @@ end
 -- Pre-allocate a bunch of FuncStats to avoid messing with results.
 -- todo: Need to measure to see what's better: this or writing everything to a temp file.
 local stats_pool = {}
-for i = 1, 500 do
+for i = 1, 20 do
 	stats_pool[i] = Profiler._new_func_stat()
 end
 
@@ -108,6 +108,7 @@ function Profiler.hooker(event, line, info)
 			print "Removing stat from pool"
 			stat_record = stat
 		end
+		stats[info.func] = stat_record
 
 		::closure_already_recorded::
 	end
