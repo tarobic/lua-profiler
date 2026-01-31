@@ -77,7 +77,6 @@ else
 end
 
 local memory_to_ignore = collectgarbage "count" - baseline_memory
-print("memory_to_ignore: " .. memory_to_ignore)
 
 --- This is an internal function.
 ---@param event string Event type
@@ -196,6 +195,7 @@ function Profiler.stop()
 		local all_times = Profiler._read_file(record.time_file)
 		record.avg_time = Profiler._average(all_times)
 
+		-- fixme
 		local all_mem_usage = Profiler._read_file(record.mem_file)
 		record.avg_mem = Profiler._average(all_mem_usage)
 	end
@@ -265,11 +265,13 @@ function Profiler.get_results(limit)
 		local time = stat.time_elapsed + dt
 		reports[i] = {
 			i,
-			stat.label or "?",
+			string.format("%s %s", stat.label or "?", stat.defined),
+			-- stat.label or "?",
 			stat.num_calls,
 			time - time % time_report_precision,
-			stat.defined,
+			-- stat.defined,
 			stat.avg_time - stat.avg_time % time_report_precision,
+			-- todo: convert between kb and mb depending on size
 			math.ceil(stat.total_mem),
 			math.ceil(stat.avg_mem),
 		}
@@ -279,7 +281,7 @@ function Profiler.get_results(limit)
 end
 
 -- todo: make these dynamic instead of hard-coded. Could use tuples of default sizes and cutoffs then clamp the stat value between them.
-local col_positions = { 3, 23, 6, 15, 29, 10, 8, 6 }
+local col_positions = { 3, 40, 8, 15, 10, 12, 6 }
 
 -- Generates a text report of functions that have been called since the profile was started.
 -- Returns the report as a string that can be printed to the console.
@@ -310,9 +312,9 @@ function Profiler.report(limit)
 
 	-- todo: refactor all of this for dynamic sizing. I'd like to be able to fit it on half a screen but that's not likely now with memory stats.
 	local row =
-		" +-----+-------------------------+--------+-----------------+-------------------------------+------------+----------+--------+\n"
+		" +-----+------------------------------------------+----------+-----------------+------------+--------------+--------+\n"
 	local col =
-		" | #   | Function                | Calls  | Time            | Code                          | Avg time   | Total kb | Avg kb |\n"
+		" | #   | Function                                 | Calls    | Time            | Avg time   | Total kb     | Avg kb |\n"
 	local report_chart = row .. col .. row
 	if #result_strings > 0 then
 		report_chart = report_chart
