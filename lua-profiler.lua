@@ -25,7 +25,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ]]
 
-local baseline_memory = collectgarbage "count"
+local baseline_memory <const> = collectgarbage "count"
 
 -- Controls when to start or stop collecting data and can be used to generate reports.
 ---@module "Profiler"
@@ -76,7 +76,24 @@ else
 	print "Warning: Profiler couldn't find chronos. Falling back to os.clock."
 end
 
-local memory_to_ignore = collectgarbage "count" - baseline_memory
+local memory_to_ignore <const> = collectgarbage "count" - baseline_memory
+
+local gc_cycles = 0
+local gc_file = assert(io.tmpfile())
+local last_cycle = 0
+do
+	local mt = {
+		__gc = function(o)
+			gc_cycles = gc_cycles + 1
+			local now = clock()
+			assert(gc_file:write(now - last_cycle))
+			assert(gc_file:write(space))
+			last_cycle = now
+			setmetatable({}, getmetatable(o))
+		end,
+	}
+	setmetatable({}, mt)
+end
 
 --- This is an internal function.
 ---@param event string Event type
@@ -218,6 +235,8 @@ function Profiler.reset()
 		table.insert(stats_pool, record)
 	end
 
+	gc_cycles = 0
+	gc_file = Profiler._reset_file(gc_file)
 	stats = {}
 	collectgarbage "collect"
 end
@@ -322,7 +341,15 @@ function Profiler.report(limit)
 			.. table.concat(result_strings, " | \n | ")
 			.. " | \n"
 	end
-	return "\n" .. report_chart .. row
+	-- return "\n" .. report_chart .. row
+
+	local gc_report = string.format(
+		"\ngc cycles: %d, gc run every %f on average",
+		gc_cycles,
+		Profiler._average(Profiler._read_file(gc_file))
+	)
+
+	return "\n" .. report_chart .. row .. gc_report
 end
 
 function Profiler._sum(t)
