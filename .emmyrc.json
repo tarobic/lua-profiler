@@ -10,7 +10,8 @@
 			"missing-parameter",
 			"param-type-mismatch",
 			"redundant-parameter",
-			"unnecessary-if"
+			"unnecessary-if",
+			"unnecessary-assert"
 		]
 	}
 }

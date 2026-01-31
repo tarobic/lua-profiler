@@ -24,7 +24,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ]]
 
--- The "profile" module controls when to start or stop collecting data and can be used to generate reports.
+-- Controls when to start or stop collecting data and can be used to generate reports.
 ---@module "Profiler"
 local Profiler = {}
 
@@ -45,19 +45,23 @@ local internal = {}
 ---@type table<function, FuncStats> Map of runtime stats for each function
 local stats = {}
 
--- Pre-allocate a bunch of FuncStats to avoid messing with results.
--- todo: Need to measure to see what's better: this or writing everything to a temp file.
-local stats_pool = {}
-for i = 1, 10 do
-	stats_pool[i] = {
+function Profiler._new_func_stat()
+	return {
 		num_calls = 0,
 		time_elapsed = 0,
 		avg_time = 0,
 		total_mem = 0,
 		avg_mem = 0,
-		time_file = io.tmpfile(),
-		mem_file = io.tmpfile(),
+		time_file = assert(io.tmpfile(), "Failed to create temp time file"),
+		mem_file = assert(io.tmpfile(), "Failed to create temp mem file"),
 	}
+end
+
+-- Pre-allocate a bunch of FuncStats to avoid messing with results.
+-- todo: Need to measure to see what's better: this or writing everything to a temp file.
+local stats_pool = {}
+for i = 1, 20 do
+	stats_pool[i] = Profiler._new_func_stat()
 end
 
 -- Set clock to chronos if found.
@@ -68,16 +72,6 @@ if chronos then
 else
 	print "Warning: Profiler couldn't find chronos. Falling back to os.clock."
 end
-
-local function sum(t)
-	local x = 0
-	for i = 1, #t do
-		x = x + t[i]
-	end
-	return x
-end
-
-local function average(t) return sum(t) / #t end
 
 --- This is an internal function.
 ---@param event string Event type
@@ -90,8 +84,7 @@ function Profiler.hooker(event, line, info)
 	if internal[f] or info.what ~= "Lua" then return end
 
 	if not stats[f] then
-		-- note: test this. might need to pcall if stats_pool is all out
-		stats[f] = table.remove(stats_pool) or { num_calls = 0, time_elapsed = 0 }
+		stats[f] = table.remove(stats_pool) or Profiler._new_func_stat()
 	end
 
 	-- get the function name if available
@@ -116,9 +109,8 @@ function Profiler.hooker(event, line, info)
 
 		-- Record function duration to calculate avg afterwards.
 		-- Doin it this way to avoid allocating a bajillion strings.
-		local file = assert(stats[f].time_file)
-		assert(file:write(dt))
-		assert(file:write(space))
+		assert(stats[f].time_file:write(dt), "Failed to write to time file")
+		assert(stats[f].time_file:write(space), "Failed to write to time file")
 
 		-- Add function memory usage to total mem
 		assert(
@@ -130,9 +122,8 @@ function Profiler.hooker(event, line, info)
 		stats[f].start_mem = nil
 
 		-- Record function memory usage to calculate avg afterwards.
-		file = assert(stats[f].mem_file)
-		assert(file:write(mem))
-		assert(file:write(space))
+		assert(stats[f].mem_file:write(mem))
+		assert(stats[f].mem_file:write(space))
 	end
 
 	if event == "tail call" then
@@ -157,19 +148,6 @@ end
 -- Starts collecting data.
 function Profiler.start() debug.sethook(Profiler.hooker, "cr") end
 
----@param file file A file full of numbers
----@return number[] All those numbers read into a table
-local function read_file(file)
-	assert(file:flush(), "Failed to write changes to profiler temp file")
-	assert(file:seek "set", "Failed to set profiler temp file to beginning")
-
-	local result = {}
-	for n in file:lines "n" do
-		result[#result + 1] = n
-	end
-	return result
-end
-
 --- Stops collecting data.
 function Profiler.stop()
 	debug.sethook()
@@ -184,8 +162,8 @@ function Profiler.stop()
 			record.start_mem = nil
 		end
 
-		record.avg_time = average(read_file(record.time_file))
-		record.avg_mem = average(read_file(record.mem_file))
+		record.avg_time = Profiler._average(Profiler._read_file(record.time_file))
+		record.avg_mem = Profiler._average(Profiler._read_file(record.mem_file))
 	end
 
 	-- merge closures
@@ -211,14 +189,6 @@ function Profiler.stop()
 	collectgarbage "collect"
 end
 
----@param file file?
----@return file
-local function reset_file(file)
-	if file and io.type(file) ~= "closed file" then assert(file:close()) end
-	file = io.tmpfile()
-	return file
-end
-
 --- Resets all collected data.
 function Profiler.reset()
 	for _, record in pairs(stats) do
@@ -228,8 +198,8 @@ function Profiler.reset()
 		record.defined = nil
 		record.label = nil
 
-		record.time_file = reset_file(record.time_file)
-		record.mem_file = reset_file(record.mem_file)
+		record.time_file = Profiler._reset_file(record.time_file)
+		record.mem_file = Profiler._reset_file(record.mem_file)
 
 		table.insert(stats_pool, record)
 	end
@@ -332,6 +302,37 @@ function Profiler.report(limit)
 			.. " | \n"
 	end
 	return "\n" .. report_chart .. row
+end
+
+function Profiler._sum(t)
+	local x = 0
+	for i = 1, #t do
+		x = x + t[i]
+	end
+	return x
+end
+
+function Profiler._average(t) return Profiler._sum(t) / #t end
+
+---@param file file?
+---@return file
+function Profiler._reset_file(file)
+	if file and io.type(file) ~= "closed file" then assert(file:close()) end
+	file = assert(io.tmpfile())
+	return file
+end
+
+---@param file file A file full of numbers
+---@return number[] All those numbers read into a table
+function Profiler._read_file(file)
+	assert(file:flush(), "Failed to write changes to profiler temp file")
+	assert(file:seek "set", "Failed to set profiler temp file to beginning")
+
+	local result = {}
+	for n in file:lines "n" do
+		result[#result + 1] = n
+	end
+	return result
 end
 
 -- store all internal profiler functions
