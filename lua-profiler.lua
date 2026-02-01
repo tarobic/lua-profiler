@@ -41,7 +41,7 @@ local default_time_report_precision <const> = 0.000001
 -- Amount of decimal places in time report. Doesn't affect actual stats, only report presentation.
 local time_report_precision = default_time_report_precision
 
----@alias FuncStats {label: string, defined: string, time_called: number, time_elapsed: number, num_calls: number, time_file: file, avg_time: number, total_mem: number, mem_file: file, avg_mem: number, start_mem: number, short_src: string, linedefined: number}
+---@alias FuncStats {label: string, time_called: number, time_elapsed: number, num_calls: number, time_file: file, avg_time: number, total_mem: number, mem_file: file, avg_mem: number, start_mem: number, short_src: string, linedefined: number}
 
 ---@type table<function, boolean> List of internal profiler functions
 local internal = {}
@@ -210,7 +210,7 @@ function Profiler.stop()
 
 		local converted_mem, size_unit =
 			utils.convert_units(record.total_mem, "kb")
-		utils.printf("%f to %f %s", record.total_mem, converted_mem, size_unit)
+		-- utils.printf("%f to %f %s", record.total_mem, converted_mem, size_unit)
 
 		local all_times = Profiler._read_file(record.time_file)
 		record.avg_time = Profiler._average(all_times)
@@ -226,7 +226,6 @@ end
 function Profiler.reset()
 	for _, record in pairs(stats) do
 		record.label = nil
-		record.defined = nil
 		record.time_called = nil
 		record.time_elapsed = 0
 		record.num_calls = 0
@@ -249,7 +248,14 @@ function Profiler.reset()
 	collectgarbage "collect"
 end
 
--- todo: add different user options for sorting
+Profiler.SortingMethod = {
+	NUM_CALLS = 1,
+	TOTAL_TIME = 2,
+	AVG_TIME = 3,
+	TOTAL_MEM = 4,
+	AVG_MEM = 5,
+}
+
 ---@param a FuncStats First function
 ---@param b FuncStats Second function
 ---@return boolean True if "a" should rank higher than "b"
@@ -257,6 +263,23 @@ function Profiler._comp(a, b)
 	local dt = b.time_elapsed - a.time_elapsed
 	if dt == 0 then return b.num_calls < a.num_calls end
 	return dt < 0
+end
+
+function Profiler._get_sorting_function(sort_by)
+	if sort_by == Profiler.SortingMethod.NUM_CALLS then
+		return function(a, b) return a.num_calls > b.num_calls end
+	elseif sort_by == Profiler.SortingMethod.TOTAL_TIME then
+		return function(a, b) return a.time_elapsed > b.time_elapsed end
+	elseif sort_by == Profiler.SortingMethod.AVG_TIME then
+		return function(a, b) return a.avg_time > b.avg_time end
+	elseif sort_by == Profiler.SortingMethod.TOTAL_MEM then
+		return function(a, b) return a.total_mem > b.total_mem end
+	elseif sort_by == Profiler.SortingMethod.AVG_MEM then
+		return function(a, b) return a.avg_mem > b.avg_mem end
+	else
+		-- default to num_calls
+		return function(a, b) return a.num_calls > b.num_calls end
+	end
 end
 
 local categories = {
@@ -291,9 +314,10 @@ local columns = {
 -- Generates a report of functions that have been called since the profile was started.
 ---@param limit number? Maximum number of results
 ---@return Result[] Table of results
-function Profiler._get_results(limit)
+function Profiler._get_results(sort_by, limit)
 	limit = limit or 500
 
+	---@type FuncStats[]
 	local sorted_stats = {}
 	for _, record in pairs(stats) do
 		if record.num_calls and record.num_calls > 0 then
@@ -301,7 +325,7 @@ function Profiler._get_results(limit)
 		end
 	end
 
-	table.sort(sorted_stats, Profiler._comp)
+	table.sort(sorted_stats, Profiler._get_sorting_function(sort_by))
 
 	while #sorted_stats > limit do
 		table.remove(sorted_stats)
@@ -335,11 +359,12 @@ function Profiler._get_results(limit)
 end
 
 -- Generates a text report of functions that have been called since the profile was started. Returns the report as a string that can be printed to the console.
+---@param sort_by Profiler.SortingMethod?
 ---@param limit number? Maximum number of rows
 ---@return string Text-based profiling report
-function Profiler.report(limit)
+function Profiler.report(sort_by, limit)
 	local result_strings = {}
-	local results = Profiler._get_results(limit)
+	local results = Profiler._get_results(sort_by, limit)
 
 	for i, result in ipairs(results) do
 		local row = {}
