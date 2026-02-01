@@ -91,13 +91,14 @@ do
 	setmetatable({}, mt)
 end
 
-local memory_to_ignore = collectgarbage "count" - baseline_memory
+---@type number
+local memory_to_ignore
 
 ---@param event string Event type
 ---@param line number  Line number
 ---@param info table? Debug info table
 function Profiler._check_stats(event, line, info)
-	-- note: I could refactor this out into separate functions but the overhead might mess with results.
+	-- note: I could refactor this out into separate functions but the overhead might mess with results. I should do it anyway this is nasty.
 	info = info or debug.getinfo(2, "fnS")
 	-- ignore the profiler itself
 	if internal[info.func] or info.what ~= "Lua" then return end
@@ -138,7 +139,6 @@ function Profiler._check_stats(event, line, info)
 	if not stat_record.short_src then
 		stat_record.short_src = info.short_src
 		stat_record.linedefined = info.linedefined
-		-- stat_record.defined = info.short_src .. ":" .. info.linedefined
 		stat_record.num_calls = 0
 		stat_record.time_elapsed = 0
 	end
@@ -446,5 +446,10 @@ end
 for _, v in pairs(Profiler) do
 	if type(v) == "function" then internal[v] = true end
 end
+
+-- Collect this at the bottom so everything outside of functions won't count
+-- towards profiling results when this module is "required".
+---@diagnostic disable-next-line: unused
+memory_to_ignore = collectgarbage "count" - baseline_memory
 
 return Profiler
