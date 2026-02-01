@@ -273,7 +273,9 @@ for i, v in ipairs(categories) do
 	reverse_categories[v] = i
 end
 
----@type table<string, {title: string, cutoff: integer}>
+---@alias ColumnInfo {title: string, cutoff: integer}
+
+---@type table<string, ColumnInfo>
 local columns = {
 	rank = { title = "#", cutoff = 3 },
 	definition = { title = "Function", cutoff = 40 },
@@ -356,40 +358,27 @@ function Profiler.report(limit)
 			row[index] = s
 		end
 
-		for k, v in pairs(row) do
-			print(k, v)
-		end
 		result_strings[i] = table.concat(row, " | ")
 	end
 
-	-- Its ugly but at least column sizes can be adjusted from one value now.
-	local row_separator = string.format(
-		" +%s+%s+%s+%s+%s+%s+%s+\n",
-		string.rep("-", columns.rank.cutoff + 2),
-		string.rep("-", columns.definition.cutoff + 2),
-		string.rep("-", columns.num_calls.cutoff + 2),
-		string.rep("-", columns.time.cutoff + 2),
-		string.rep("-", columns.avg_time.cutoff + 2),
-		string.rep("-", columns.total_mem.cutoff + 2),
-		string.rep("-", columns.avg_mem.cutoff + 2)
-	)
-	local category_headers = string.format(
-		" | %s%s | %s%s | %s%s | %s%s | %s%s | %s%s | %s%s |\n",
-		columns.rank.title,
-		string.rep(space, columns.rank.cutoff - #columns.rank.title),
-		columns.definition.title,
-		string.rep(space, columns.definition.cutoff - #columns.definition.title),
-		columns.num_calls.title,
-		string.rep(space, columns.num_calls.cutoff - #columns.num_calls.title),
-		columns.time.title,
-		string.rep(space, columns.time.cutoff - #columns.time.title),
-		columns.avg_time.title,
-		string.rep(space, columns.avg_time.cutoff - #columns.avg_time.title),
-		columns.total_mem.title,
-		string.rep(space, columns.total_mem.cutoff - #columns.total_mem.title),
-		columns.avg_mem.title,
-		string.rep(space, columns.avg_mem.cutoff - #columns.avg_mem.title)
-	)
+	-- Dynamically build row and column borders and titles for each column.
+	local row_separator, category_headers = " +", " | "
+	for _, v in ipairs(categories) do
+		local col_info = columns[v]
+		row_separator = string.format(
+			"%s%s+",
+			row_separator,
+			string.rep("-", col_info.cutoff + 2)
+		)
+		category_headers = string.format(
+			"%s%s%s | ",
+			category_headers,
+			col_info.title,
+			string.rep(space, col_info.cutoff - #col_info.title)
+		)
+	end
+	row_separator = row_separator .. "\n"
+	category_headers = category_headers .. "\n"
 
 	local report_chart = row_separator .. category_headers .. row_separator
 	if #result_strings > 0 then
@@ -398,7 +387,6 @@ function Profiler.report(limit)
 			.. table.concat(result_strings, " | \n | ")
 			.. " | \n"
 	end
-	-- return "\n" .. report_chart .. row
 
 	local gc_report = gc_cycles > 1
 			and string.format(
