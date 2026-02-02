@@ -100,6 +100,7 @@ local memory_to_ignore
 function Profiler._check_stats(event, line, info)
 	-- note: I could refactor this out into separate functions but the overhead might mess with results. I should do it anyway this is nasty.
 	info = info or debug.getinfo(2, "fnS")
+	assert(info)
 	-- ignore the profiler itself
 	if internal[info.func] or info.what ~= "Lua" then return end
 
@@ -178,7 +179,7 @@ function Profiler._check_stats(event, line, info)
 		stat_record.time_called = clock()
 		stat_record.start_mem = collectgarbage "count"
 	else
-		stat_record.num_calls = stat_record.num_calls + 1
+		stat_record.num_calls = (stat_record.num_calls or 0) + 1
 	end
 end
 
@@ -248,6 +249,12 @@ function Profiler.reset()
 	collectgarbage "collect"
 end
 
+---@alias Profiler.SortingMethod
+---| "NUM_CALLS"
+---| "TOTAL_TIME"
+---| "AVG_TIME"
+---| "TOTAL_MEM"
+---| "AVG_MEM"
 Profiler.SortingMethod = {
 	NUM_CALLS = 1,
 	TOTAL_TIME = 2,
@@ -303,15 +310,16 @@ local columns = {
 	rank = { title = "#", cutoff = 3 },
 	definition = { title = "Function", cutoff = 40 },
 	num_calls = { title = "Calls", cutoff = 8 },
-	time = { title = "Time", cutoff = 15 },
-	avg_time = { title = "Avg time", cutoff = 10 },
-	total_mem = { title = "Total kb", cutoff = 12 },
-	avg_mem = { title = "Avg kb", cutoff = 6 },
+	time = { title = "Total Time", cutoff = 15 },
+	avg_time = { title = "Avg Time", cutoff = 10 },
+	total_mem = { title = "Total Memory", cutoff = 12 },
+	avg_mem = { title = "Avg Memory", cutoff = 12 },
 }
 
 ---@alias Result {rank: integer, definition: string, num_calls: integer, time: number, avg_time: number, total_mem: number, avg_mem: number}
 
 -- Generates a report of functions that have been called since the profile was started.
+---@param sort_by Profiler.SortingMethod?
 ---@param limit number? Maximum number of results
 ---@return Result[] Table of results
 function Profiler._get_results(sort_by, limit)
@@ -338,6 +346,7 @@ function Profiler._get_results(sort_by, limit)
 		if stat.time_called then dt = clock() - stat.time_called end
 
 		local time = stat.time_elapsed + dt
+
 		reports[i] = {
 			rank = i,
 			definition = string.format(
@@ -349,9 +358,14 @@ function Profiler._get_results(sort_by, limit)
 			num_calls = stat.num_calls,
 			time = time - time % time_report_precision,
 			avg_time = stat.avg_time - stat.avg_time % time_report_precision,
-			-- todo: convert between kb and mb depending on size
-			total_mem = utils.round(stat.total_mem),
-			avg_mem = utils.round(stat.avg_mem),
+			total_mem = string.format(
+				"%.2f %s",
+				utils.convert_units(stat.total_mem, "kb")
+			),
+			avg_mem = string.format(
+				"%.2f %s",
+				utils.convert_units(stat.avg_mem, "kb")
+			),
 		}
 	end
 
