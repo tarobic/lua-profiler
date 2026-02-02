@@ -1,4 +1,3 @@
---
 --[[
 This file is a part of the "profile.lua" library.
 
@@ -35,13 +34,7 @@ local utils = require "lua_utils"
 
 local space <const> = " "
 
--- todo: Get user input to specify precision or fallback to this. Probably don't want them to have to type a bunch of zeros so I'll need to convert e.g. 7 to 0.0000001
-local default_time_report_precision <const> = 0.000001
-
--- Amount of decimal places in time report. Doesn't affect actual stats, only report presentation.
-local time_report_precision = default_time_report_precision
-
----@alias FuncStats {label: string, time_called: number, time_elapsed: number, num_calls: number, time_file: file, avg_time: number, total_mem: number, mem_file: file, avg_mem: number, start_mem: number, short_src: string, linedefined: number}
+---@alias FuncStats {name: string, time_called: number, time_elapsed: number, num_calls: number, time_file: file, avg_time: number, total_mem: number, mem_file: file, avg_mem: number, start_mem: number, short_src: string, linedefined: number}
 
 ---@type table<function, boolean> List of internal profiler functions
 local internal = {}
@@ -74,6 +67,7 @@ else
 	print "Warning: Profiler couldn't find chronos. Falling back to os.clock."
 end
 
+-- Record time between and amount of gc cycles
 local gc_cycles = 0
 local gc_file = assert(io.tmpfile())
 local last_cycle = 0
@@ -133,7 +127,7 @@ function Profiler._check_stats(event, line, info)
 	end
 
 	-- get the function name if available
-	if info.name then stat_record.label = info.name end
+	if info.name then stat_record.name = info.name end
 
 	-- find the line definition
 	-- if not stat_record.defined then
@@ -209,10 +203,6 @@ function Profiler.stop()
 
 		record.total_mem = record.total_mem - memory_to_ignore
 
-		local converted_mem, size_unit =
-			utils.convert_units(record.total_mem, "kb")
-		-- utils.printf("%f to %f %s", record.total_mem, converted_mem, size_unit)
-
 		local all_times = Profiler._read_file(record.time_file)
 		record.avg_time = Profiler._average(all_times)
 
@@ -226,7 +216,7 @@ end
 --- Resets all collected data.
 function Profiler.reset()
 	for _, record in pairs(stats) do
-		record.label = nil
+		record.name = nil
 		record.time_called = nil
 		record.time_elapsed = 0
 		record.num_calls = 0
@@ -289,7 +279,10 @@ function Profiler._get_sorting_function(sort_by)
 	end
 end
 
-local categories = {
+-- Both of the tables below are used to help formatting reports by allowing dictionaries
+-- to index into them and maintain a consistent order even when iterating with "pairs".
+-- We need this so the final chart remains consistent each run and easy to adjust.
+local categories <const> = {
 	"rank",
 	"definition",
 	"num_calls",
@@ -323,7 +316,7 @@ local columns = {
 ---@param limit number? Maximum number of results
 ---@return Result[] Table of results
 function Profiler._get_results(sort_by, limit)
-	limit = limit or 500
+	limit = limit or 200
 
 	---@type FuncStats[]
 	local sorted_stats = {}
@@ -346,18 +339,19 @@ function Profiler._get_results(sort_by, limit)
 		if stat.time_called then dt = clock() - stat.time_called end
 
 		local time = stat.time_elapsed + dt
+		local precision <const> = 0.000001
 
 		reports[i] = {
 			rank = i,
 			definition = string.format(
 				"%s %s:%s",
-				stat.label or "?",
+				stat.name or "?",
 				stat.short_src,
 				stat.linedefined
 			),
 			num_calls = stat.num_calls,
-			time = time - time % time_report_precision,
-			avg_time = stat.avg_time - stat.avg_time % time_report_precision,
+			time = time - time % precision,
+			avg_time = stat.avg_time - stat.avg_time % precision,
 			total_mem = string.format(
 				"%.2f %s",
 				utils.convert_units(stat.total_mem, "kb")
@@ -387,6 +381,7 @@ function Profiler.report(sort_by, limit)
 			local cutoff = columns[k].cutoff
 			local s_len = s:len()
 
+			-- Either pad or shorten value to fit inside column width.
 			if s_len < cutoff then
 				s = s .. space:rep(cutoff - s_len)
 			elseif s_len > cutoff then
@@ -404,13 +399,11 @@ function Profiler.report(sort_by, limit)
 	local row_separator, category_headers = " +", " | "
 	for _, v in ipairs(categories) do
 		local col_info = columns[v]
-		row_separator = string.format(
-			"%s%s+",
+		row_separator = ("%s%s+"):format(
 			row_separator,
 			string.rep("-", col_info.cutoff + 2)
 		)
-		category_headers = string.format(
-			"%s%s%s | ",
+		category_headers = ("%s%s%s | "):format(
 			category_headers,
 			col_info.title,
 			string.rep(space, col_info.cutoff - #col_info.title)
@@ -428,8 +421,7 @@ function Profiler.report(sort_by, limit)
 	end
 
 	local gc_report = gc_cycles > 1
-			and string.format(
-				"\ngc cycles: %d, gc run every %f on average",
+			and ("\ngc cycles: %d, gc run every %f on average"):format(
 				gc_cycles,
 				Profiler._average(Profiler._read_file(gc_file))
 			)
@@ -476,6 +468,7 @@ end
 
 -- Collect this at the bottom so everything outside of functions won't count
 -- towards profiling results when this module is "required".
+-- It ain't perfect but it should help a little.
 ---@diagnostic disable-next-line: unused
 memory_to_ignore = collectgarbage "count" - baseline_memory
 
